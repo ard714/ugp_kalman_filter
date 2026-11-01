@@ -1,0 +1,347 @@
+# Dynamic-PCI Code Audit & Improvement Plan
+
+> Full inspection of `dynamic_pci.py`, `backtest.py`, `neural_kalman_pci.py`,
+> `run_all_pairs.py`, `data_loader.py`, and `simulate.py`.
+
+---
+
+## Section 1 — Mathematical / Implementation Bugs
+
+### 🔴 BUG 1 — Kalman filter F-matrix is **wrong** in the training loop
+
+**File:** `run_all_pairs.py` line 84–87 (4-state `train_neural_kalman_4state`)
+
+```python
+# CURRENT (WRONG):
+F_mat = torch.tensor(
+    [[1, 0, 0, 0], [0, fitted_dyn.p.rho, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+)
+```
+
+The state vector is `[X1, beta, M, R]`. The correct F matrix is:
+- `X1 → 1` (random walk)
+- `beta → 1` (random walk)
+- `M → rho` (AR(1))
+- `R → 1` (random walk)
+
+```python
+# CORRECT:
+F_mat = torch.tensor(
+    [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, rho, 0], [0, 0, 0, 1]],
+)
+```
+
+The current code puts `rho` in the **beta** position (index [1,1]) instead of the **M** position (index [2,2]). This means the neural network is trained against the wrong state dynamics — beta decays, M propagates as a random walk. **This is the single highest-impact bug.**
+
+---
+
+### 🔴 BUG 2 — H matrix is **static** in the 4-state neural loop
+
+**File:** `run_all_pairs.py` lines 70–73, 103, 141
+
+```python
+# CURRENT (WRONG): H is built once with beta0 and never updated
+H_static = np.array([[fitted_dyn.p.beta0, 1, 1, 0], [1, 0, 0, 1]])
+```
+
+But the correct observation matrix for the 4-state model is time-varying:
+```
+H_t = [[0, x1[t], 1, 1],
+       [1,   0,   0, 0]]
+```
+
+Row 1 says `X2_t = 0*X1_t + beta_t * x1[t] + M_t + R_t`. The coefficient for `beta_t` is `x1[t]` (the current price of X1), **not** `beta0`. Using a static H means the observation model is wrong for any time step where `x1[t] ≠ 1.0`, and especially wrong when prices are normalized (since x1[t] drifts from 1.0 over time).
+
+Also, the columns are in the wrong order in the static H. Current: `[beta0, 1, 1, 0]` but should be `[0, x1[t], 1, 1]` (state = [X1, beta, M, R], not [beta, M, R, X1]).
+
+---
+
+### 🔴 BUG 3 — `KalmanNetGain.forward()` signature mismatch
+
+**File:** `neural_kalman_pci.py` line 31, `run_all_pairs.py` line 107
+
+`KalmanNetGain.forward(dm1y, dm1x, h_prev)` takes **three arguments**: innovation `e_t`, prior state `x_prior`, and hidden state `h_prev`.
+
+But in `run_all_pairs.py`, it is called as:
+```python
+K_t, h_prev = model(e_t, x_prior, batch_S[:, t], h_prev)  # 4 args — WRONG
+```
+`batch_S[:, t]` is being passed as the third argument but the method only accepts `h_prev` in the third position. The model ignores `h_prev` entirely in this call because it is shifted to the 4th position. This means **the GRU hidden state is never propagated** — the RNN has no memory across time steps during training.
+
+---
+
+### 🟡 BUG 4 — Observation noise covariance `R` is missing from the filter
+
+**File:** `dynamic_pci.py` lines 157–158
+
+```python
+S = H @ P_pred @ H.T  # no R_obs added
+```
+
+The innovation covariance should be `S = H P H^T + R_obs`. Without `R_obs`, the filter over-trusts observations and the Kalman gain is too aggressive (especially at initialization when `P` is tiny). This makes the hedge ratio beta jump erratically in the first few hundred steps.
+
+> **Fix:** Add a small observation noise `R_obs = diag([sigma_obs_x2^2, sigma_obs_x1^2])`.
+
+---
+
+### 🟡 BUG 5 — Initial state covariance `P_0` sets X1, M, R to near-zero
+
+**File:** `dynamic_pci.py` line 128
+
+```python
+P = np.diag([1e-8, self.p.p_beta0, 1e-8, 1e-8])
+```
+
+This says the filter is almost certain about `X1_0`, `M_0`, and `R_0` at time 0. `M_0 = 0` and `R_0 = r0` are reasonable initial guesses, but the near-zero uncertainty causes the filter to completely ignore early observations for these states. A better initialization:
+
+```python
+P = np.diag([sigma_X**2, p_beta0, sigma_M**2, sigma_R**2])
+```
+
+---
+
+### 🟡 BUG 6 — `DifferentiableSharpeLoss` uses spread innovation, not strategy returns
+
+**File:** `neural_kalman_pci.py` line 86–86, `run_all_pairs.py` line 108
+
+```python
+e_t_traj.append(e_t[:, 0])         # spread INNOVATION (prediction error)
+# ...
+strategy_returns = positions * returns_t  # 'returns_t' is the ACTUAL hedge return
+```
+
+The Sharpe loss generates positions from `e_t` (prediction error ≠ mean-reverting M_t z-score), then multiplies by `returns_t` (a **pre-computed** constant tensor from formation period). Actual OOS P&L needs `returns_t` to be computed from the **current** portfolio position applied to actual next-period price changes. Currently the strategy optimizes a noisy approximation of Sharpe computed on stale returns.
+
+---
+
+### 🟡 BUG 7 — Trading signal uses expanding z-score on the **filtered** M_t
+
+**File:** `backtest.py` lines 21–30, 62
+
+```python
+z = zscore(M_t, window=z_window)  # expanding or rolling z-score of M_t
+```
+
+The classical Kalman filter already whitens innovations. Using a z-score of M_t (which is not stationary — it has near-unit-root dynamics from the R_t component mixing in) adds noise. The proper signal is the **Kalman innovation** `e_t = y_t − H z_{t|t-1}` normalized by its predicted standard deviation `sqrt(S_t[0,0])`. That is exactly the innovation z-score and it is already produced by the filter. Currently `e_t` is computed but not used in backtest.
+
+---
+
+### 🟠 ISSUE 8 — `tau_close` sign convention causes perpetual holding
+
+**File:** `backtest.py` lines 92–95
+
+```python
+if pos_prev == 1.0 and zt_val > tau_close:   # tau_close = -0.5 by default
+    exit_now = True
+elif pos_prev == -1.0 and zt_val < -tau_close:  # = zt_val < 0.5
+    exit_now = True
+```
+
+For a **long** position (entered when z < −1.0), you exit when z > −0.5, i.e., the spread has risen back to normal. That is correct. But the docstring says `tau_close = -0.5` meaning "the signed threshold", which is already negative, so `zt_val > -0.5` exits correctly. However, this means a long position entered at z = -1.2 exits any time z > -0.5 — **not when it crosses zero**. In mean-reversion strategies, closing at zero (or at a small positive value) captures more of the reversion. With tau_close = -0.5, you exit **very early** and miss most of the P&L.
+
+The Clegg & Krauss (2018) convention is to exit when Z crosses 0 (not at -0.5). Recommend: `tau_close = 0.0`.
+
+---
+
+### 🟠 ISSUE 9 — `transaction_cost = 0.0` by default
+
+**File:** `backtest.py` line 34
+
+The default transaction cost is zero. With the current strategy generating many trades, the realized P&L is significantly overstated. Any "profitable" result without non-zero transaction cost is unreliable.
+
+---
+
+## Section 2 — Training Pipeline Issues
+
+### Issue A — Stage 1 trains on reconstruction of **both** observations
+
+The MSE loss trains the network to reconstruct `[X2_t, X1_t]` well. But `X1_t` is the driver and its reconstruction is trivially good (it's a random walk and almost directly observable). This wastes half the model's capacity. Should only minimize reconstruction error on the **spread observation** `X2_t`.
+
+### Issue B — No validation / early stopping
+
+Both training stages run a fixed number of epochs with no hold-out. On a single time series of ~1000 points, the GRU can overfit easily by epoch 10–15. Need chronological hold-out (e.g., last 20% of formation data).
+
+### Issue C — Model is re-initialized from scratch for every pair
+
+```python
+model = KalmanNetGain(state_dim=4, obs_dim=2, hidden_dim=32)
+# ... then immediately fc_out.weight.data.fill_(0)
+```
+
+Training from scratch on ~1000 points each is insufficient for a model with `(4+2)*10*8 = 480` inputs at layer 1 and a GRU of hidden size `(16+4)*10 = 200`. The model has ~300,000 parameters trained on ~1000 samples. This is severe overfitting territory.
+
+### Issue D — GRU hidden state dimension is very large
+
+```python
+self.hidden_dim = (self.m * self.m + self.n * self.n) * 10  # (16 + 4)*10 = 200
+```
+
+For `m=4, n=2`: hidden_dim = 200. With only 1000 training points, this GRU has far too much capacity. A hidden_dim of 16–32 is more appropriate.
+
+---
+
+## Section 3 — Backtest Logic Issues
+
+### Issue E — P&L formula uses `beta_t[t-1]` not `beta_t[t]`
+
+**File:** `backtest.py` line 110
+
+```python
+b = beta_t[t - 1]  # uses YESTERDAY's hedge ratio to compute today's P&L
+```
+
+When you hold a position overnight with hedge ratio `b`, the correct hedge is the one used when the position was **opened** (or rebalanced). Using `t-1` is actually more correct than `t` for a **rebalanced** portfolio (since you hedge at the start of the period). This is fine but should be documented.
+
+### Issue F — Pair return normalization treats beta as dollar-weighting
+
+```python
+denom = 1.0 + abs(b)
+w2 = 1.0 / denom
+w1 = b / denom
+pair_return[t] = pos_prev * (w2 * r_x2 - w1 * r_x1)
+```
+
+This normalizes by `(1 + |beta|)` making the total dollar notional fixed at 1.0. For beta values above 1 (common), w1 > 0.5 and the X1 leg dominates. This is a valid convention but note: if beta drifts significantly, the position weights change day-to-day, implying continuous rebalancing and additional transaction costs not captured.
+
+---
+
+## Section 4 — Data Pipeline Issues
+
+### Issue G — No price normalization before Kalman filter
+
+**File:** `data_loader.py` — raw adj close prices used
+
+The prices go from ~$10 to ~$200. When `sigma_X = std(diff(x1))` is computed, it is in **dollar** units (~$1-5/day). The H matrix encodes `x1[t]` which ranges over $10–$200. This means the Kalman gain and observation equations are numerically sensitive to the absolute price level. Normalize to base 1.0 (price / price[0]) before fitting.
+
+### Issue H — Train/test split does not re-normalize to base 1.0
+
+If you normalize the **formation period** to base 1.0 but then hand the **raw** out-of-sample prices to the filter, the initial state z0 will be wrong (it expects x1[0] ≈ 1.0 but gets x1[0] ≈ $50 or whatever the formation-end price was). The fix: normalize the FULL series to base 1.0 before splitting.
+
+---
+
+## Section 5 — Regime Detection Design
+
+The regime classifier addresses the root cause: some time windows have a reliable mean-reverting relationship, others don't. Trading in non-MR windows is the main source of losses.
+
+### Recommended architecture: Rolling logistic classifier
+
+**Why not LSTM/HMM first:** Both require labeled training data or EM fitting, which is slow and introduces its own overfitting risk. A logistic classifier on rolling features is fast, interpretable, and easy to validate.
+
+**Features (all computed causally — no lookahead):**
+
+| Feature | Window | Description |
+|---|---|---|
+| `spread_zscore` | 60-day rolling | Current z-score of M_t |
+| `vol_ratio` | 20/60-day | Short-vol / long-vol of spread |
+| `half_life_est` | rolling | Rolling OLS AR(1) of M_t → derived half-life |
+| `r2_mr` | rolling | Rolling partial cointegration R²_MR |
+| `beta_change` | 20-day | Rolling std of daily Δβ_t (instability signal) |
+| `return_corr` | 60-day | Rolling return correlation of X1, X2 |
+| `ADF_pvalue` | 60-day | ADF test p-value on rolling M_t (mean-reversion test) |
+
+**Label construction (for supervised training):**
+- Forward-looking P&L of the spread position over the next 20 days (from formation period only)
+- Label = 1 if 20-day P&L > some threshold, 0 otherwise
+- **This is computed on formation data ONLY — never on out-of-sample data.**
+
+**Training protocol:**
+1. Compute labels on formation data (in-sample).
+2. Fit logistic regression / small MLP on formation features.
+3. On out-of-sample data: run classifier forward-only. Execute Bollinger Band trade only if `P(MR-regime) > threshold` (threshold tuned on last 20% of formation data).
+
+---
+
+## Section 6 — Incremental Implementation Plan
+
+> **Rule:** Each step runs `python simulate.py` (ground truth validation) and `python run_demo.py` (real data) before the next step begins.
+
+### Step 1 — Fix the three critical bugs (no new features)
+**Files:** `dynamic_pci.py`, `neural_kalman_pci.py`, `run_all_pairs.py`
+
+1. Fix F-matrix in training loop (Bug 1): `F[1,1]=1`, `F[2,2]=rho`
+2. Fix H-matrix to be time-varying in training loop (Bug 2)
+3. Fix `KalmanNetGain.forward()` call signature (Bug 3)
+4. Add observation noise `R_obs` to the classical filter (Bug 4)
+
+**Expected outcome:** Neural model actually learns. Classical filter is more stable.
+
+### Step 2 — Fix the backtest
+**Files:** `backtest.py`
+
+1. Change `tau_close = 0.0` (exit when z crosses zero)
+2. Add `transaction_cost = 0.001` (10 bps per turn, round-trip)
+3. Use Kalman innovation z-score as primary signal (from `innovation` / `sqrt(innovation_var)`) instead of z-score of M_t
+
+**Expected outcome:** Cleaner, more realistic P&L. Trade count drops.
+
+### Step 3 — Price normalization
+**Files:** `data_loader.py`, `run_demo.py`, `run_all_pairs.py`
+
+1. Normalize the **full** price series to base 1.0 before fitting.
+2. All Kalman operations work in normalized-price space.
+
+**Expected outcome:** Kalman gain is numerically consistent across all pairs.
+
+### Step 4 — Reduce neural model capacity + add early stopping
+**Files:** `neural_kalman_pci.py`, `run_all_pairs.py`
+
+1. Reduce GRU hidden_dim: `(m+n)*4` instead of `(m²+n²)*10`
+2. Add chronological hold-out (last 20% of formation): track val loss, stop when it starts rising
+3. Only backpropagate through spread leg (not X1 leg) in Stage 1
+
+**Expected outcome:** Less overfitting. OOS performance improves.
+
+### Step 5 — Regime classifier (gating layer)
+**New file:** `regime_filter.py`
+
+1. Implement rolling feature computation (7 features from Section 5)
+2. Fit logistic regression on formation period labels
+3. Modify `backtest.py` to accept `regime_mask` array (1 = trade, 0 = flat)
+4. Threshold tuned on last 20% of formation data (pure hold-out)
+5. Evaluate: does gated strategy beat ungated in Sharpe and drawdown?
+
+**Expected outcome:** 20–40% reduction in losing trades. Flat in non-MR periods.
+
+### Step 6 — Walk-forward validation
+**New file:** `walkforward.py`
+
+1. Rolling 2-year formation / 6-month trading window
+2. Refit all parameters (MLE, neural net, regime classifier) on each window
+3. Concatenate OOS periods to get a clean, leakage-free performance series
+4. Compare: Static / Dynamic / Neural / Regime-Gated on: Sharpe, Max DD, Turnover, Net P&L
+
+---
+
+## Section 7 — Known Good Pairs vs Problematic Pairs
+
+Based on typical literature findings and pair characteristics:
+
+| Pair | Formation Corr | Typical MR Strength | Notes |
+|------|---------------|---------------------|-------|
+| KO/PEP | ~0.80 | Strong | Same sector, oligopoly; best MR pair |
+| EWA/EWC | ~0.92 | Strong | Near-identical commodity exposure |
+| XOM/CVX | ~0.88 | Moderate | Good but broken during oil shocks |
+| GS/CVX | ~0.50 | Weak | Cross-sector; MR only episodic |
+| **AAP/IBM** | **~0.30–0.50** | **Very weak** | **Cross-sector; retail vs tech — not a valid pair** |
+| NKE/AES | ~0.35 | Very weak | Cross-sector; problematic |
+| MRK/VZ | ~0.40 | Weak | Cross-sector; healthcare vs telecom |
+
+**AAP–IBM is not a cointegrated pair.** They are in completely different sectors (auto parts retail vs enterprise tech). The correlation is low and episodic. This pair should be **excluded or used only as a negative control** to test that the regime classifier correctly flat-lines it.
+
+---
+
+## Summary of Priorities
+
+| Priority | Action | Impact |
+|---|---|---|
+| P0 | Fix F-matrix bug (Bug 1) | Fixes neural model completely |
+| P0 | Fix H-matrix to be time-varying (Bug 2) | Fixes observation equations |
+| P0 | Fix `forward()` call signature (Bug 3) | Enables GRU memory |
+| P1 | Add R_obs to Kalman filter | More stable classical filter |
+| P1 | Change tau_close to 0.0 | More P&L captured per trade |
+| P1 | Add transaction costs (10bps) | Realistic P&L |
+| P1 | Normalize prices to base 1.0 | Numerical consistency |
+| P2 | Reduce model capacity + early stopping | Reduce overfitting |
+| P3 | Regime classifier (logistic gating) | Reduce losing trades |
+| P4 | Walk-forward validation | Trustworthy OOS evaluation |
+| — | Remove AAP/IBM from core analysis | Not a valid pair |

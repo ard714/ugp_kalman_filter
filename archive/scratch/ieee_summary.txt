@@ -1,0 +1,147 @@
+=== PAGE 1 ===
+1974 IEEE TRANSACTIONS ON SIGNAL PROCESSING, VOL. 72, 2024
+Neural Augmented Kalman Filtering With Bollinger
+Bands for Pairs Trading
+Amit Milstein , Guy Revach , Haoran Deng , Hai Morgenstern , and Nir Shlezinger
+Abstract —Pairs trading is a family of trading techniques that
+determine their policies based on monitoring the relationships
+between pairs of assets. A common pairs trading approach relieson describing the pairwise relationship as a linear Space State(SS) model with Gaussian noise. Th is representation facilitates
+extracting ﬁnancial indicators wi th low complexity and latency
+using a Kalman Filter (KF), which are then processed usingclassic policies such as Bollinger Bands (BB). However, suchSS models are inherently approximated and mismatched, oftendegrading the revenue. In this work, we propose KalmanNet-aided Bollinger bands Pairs Trading (KBPT), a deep learningaided policy that augments the operation of KF-aided BB trading.KBPT is designed by formulating an extended SS model for pairstrading that approximates their relationship as holding partialco-integration. This SS model is utilized by a trading policy thataugments KF-BB trading with a dedicated neural network basedon the KalmanNet architecture. The resulting KBPT is trained ina two-stage manner, which ﬁrst tunes the tracking algorithm in anunsupervised manner independently of the trading task, followedby its adaptation to track the ﬁnancial indicators to maximizerevenue while approximating BB with a differe
+=== PAGE 2 ===
+MILSTEIN et al.: NEURAL AUGMENTED KALMAN FILTERING WITH BOLLINGER BANDS FOR PAIRS TRADING 1975
+see survey in [22]. Common deep learning architectures for
+ﬁnancial modeling and prediction include recurrent neural net-
+works (RNNs) [23], auto-encoders [24], anomaly detection [25]
+and attention models [26],[27]. Reinforcement Learning (RL)
+is considered for training deep trading policies [21],[28],[29],
+[30],[31],[32] to maximize the reward in an end-to-end fash-
+ion. To generate various inputs, it was proposed to use deep
+learning-based natural language processing to analyze social
+media and news for trading [20],[23]. Despite their growing
+popularity, deep learni ng-based quantitative methods have sev-
+eral drawbacks. They are based on highly parameterized black
+boxes, giving rise to latency considerations. Moreover, deeplearning-based policies lack the interpretability and reliability
+of model-based methods and do not incorporate established
+models, which are at the core of pairs trading. In addition, these
+methods tend to have a long training time and require large
+volumes of data for training, which can constitute a limiting fac-
+tor in high-frequency trading. This motivates designing trading
+techniques that simultaneously beneﬁt from the approximated
+modeling adopted by classical trading schemes alongside theabstractness and capabilitie s of data-driven deep learning meth-
+ods.
+In this work, we propose Kal manNet-aided Bollinger bands
+Pairs Trading (KBPT), a pairs trading 
+=== PAGE 3 ===
+1976 IEEE TRANSACTIONS ON SIGNAL PROCESSING, VOL. 72, 2024
+exit points, assess risks, and ultimately optimize the investment
+strategy. Quantitative ﬁnancial i ndicators can i nclude techni-
+cal indicators (e.g., moving averages, relative strength index)[47], fundamental indicators (e.g., earnings per share, price-to-
+earnings ratio), or macroeconomic indicators (e.g., GDP growth
+rate, inﬂation rate) [48].
+To formulate this mathematically, we use d
+tto denote the
+ﬁnancial information (e.g., assets’ price) at time t>0.Aﬁnan-
+cial tracker , denoted ϕ, is a mapping of all the ﬁnancial data
+accumulated until time tinto ﬁnancial indicators zt, i.e.,
+ϕ:{dτ}τ≤t/mapsto→zt. (1)
+The ﬁnancial indicator should provide sufﬁcient information for
+the policy to dictate the current decision, as detailed next.
+2) Policy: The policy component of a trading scheme,
+denoted by π, refers to the rules, guidelines, and principles
+that govern the decision-making process and the execution oftrades. The policy component, in general, may encompass both
+quantitative and qualitative aspects: Quantitative aspects can
+involve speciﬁc parameters, thresholds, or algorithms based onﬁnancial indicator s or other mathematical models. Qualitative
+aspects consider fact ors such as market cond itions, investor
+sentiment, news events, or expert judgment.
+The policy is the last step of the trading scheme and outputs
+the recommended actions for the trader to take to optimize
+proﬁts. We refer to the return of each trade 
+=== PAGE 4 ===
+MILSTEIN et al.: NEURAL AUGMENTED KALMAN FILTERING WITH BOLLINGER BANDS FOR PAIRS TRADING 1977
+Fig. 2. Comparison between the tradi ng actions of the cumulative trading
+policy (green) and an instantaneous tr ading policy along with the MA and
+upper BB limit. Here, Ccloses a position, Oopens a position, and COcloses
+and opens a position on the same day.
+trading strategies using RL [31],[49],[50], one is often inter-
+ested in obtaining instantaneous rewards . This is achieved by
+closing a position after a singl e time step (though it can then
+be re-opened and treated as a new active position, yielding an
+additional transaction cost, i.e., friction [18], which we omit for
+simplicity). Such an operation results in
+cpt=U/parenleftbig
+|opt−1|/parenrightbig
+. (8)
+Alternatively, one can determine the close position based on the
+indicator, allowing a cumulative reward where a position can
+be held over multiple time steps. In this case, the closing of a
+position is a function of the indicator zt. For instance, one can
+decide to close a currently open position if zthas crossed the
+middle or opposite band [4],[51],[52], i.e.,
+cpt=U(−zt−1·zt)·(1−U(τcp,t−τop,t)). (9)
+A comparison between the cumulative and instantaneous ap-
+proaches is schematically illustrated in Fig. 2, where only the
+middle and upper Bollinger Bands ar e drawn for clarity. As
+depicted in Fig. 2, the instantaneous trading policy effectively
+makes a proﬁt based on the difference between the asset price
+when it crosses the
+=== PAGE 6 ===
+MILSTEIN et al.: NEURAL AUGMENTED KALMAN FILTERING WITH BOLLINGER BANDS FOR PAIRS TRADING 1979
+and thus, it describes the difference between the posterior
+and the prior. Using the fact that yt=βtand substituting the
+time-varying relationship between αtandβtfrom ( 18), we
+obtain that
+Δyt=st+/parenleftBig
+(ht−ˆht|t−1)+(μt−ˆμt|t−1)/parenrightBig
+. (19)
+From ( 19), it follows that Δytis an estimate of the value
+of the spread corrupted by an additive term that representsthe estimation error at time t. Thus,Δy
+tcan be used as an
+equivalent pairwise asset, from which one can extract a valuable
+indicator for BB as in ( 4), i.e.,
+zt=Δyt
+σy
+t. (20)
+Here,σy
+tis the STD of Δyt(which is also tracked by the KF
+for computing the KG).
+B. Partial Co-Integration in Pairs Trading
+While the CI model for pairs trading gives rise to a simple
+KF-aided trading policy, it is limited in the sense that it does not
+incorporate any temporal statistical model on the spread timesequence, which is at the core of the ﬁnancial indicator. Such
+a temporal statistical model is incorporated by extending the
+n o t i o no fC Ii n t oP C I [17]. In the following, we ﬁrst recall the
+PCI deﬁnition, after which we re view its associated SS model
+proposed in [17], and then further extend it to propose the SS
+model for pairs trading used in our derivation in Section IV.
+1) Partial Co-Integration: An extended deﬁnition of CI is
+that of PCI [17]:
+Deﬁnition 4 (Partial Co-Integration): A multivariate time
+sequence ¯x
+tis sai
+=== PAGE 7 ===
+1980 IEEE TRANSACTIONS ON SIGNAL PROCESSING, VOL. 72, 2024
+IV . N EURAL AUGMENTED TRADING POLICY
+We are interested in exploitin g the SS model representation
+in (24) for formulating a trading policy following established
+approaches combining KF and BB policies, e.g., [17]. However,
+the application of such methodologies gives rise to the follow-ing challenges:
+C1modeling Stochasticity: KF inherently assumes Gaussian
+noise. This is unlikely to hold in ﬁnancial data, and thenoise tends to follow a heavy-tailed distribution [63].
+C2modeling Mismatches: the models for F
+tandgtin (24),
+which follow from the PCI, are an approximation of thecomplex real-world dynamics governing pairs trading.
+Therefore, a model mismatch is inevitable.
+C3State Tracking: Tracking based on KF is inherently de-
+signed to provide an accurate estimate of its state vector
+x
+t. Here,xtis comprised of model parameters that do not
+necessarily represent a physi cal quantity but are rather in-
+termediate variables used for trading policy. One is really
+interested in obtaining a representation that is most useful
+for pairs trading in the PNL sense. However, the conven-tional KF is tailorly designed to optimize tracking the
+state, which is here assumed model parameters, though
+this might be sub-optimal for maximizing the PNL.
+To enable pairs trading under C1–C3, we propose a hybrid
+model-based/data-driven algorithm based on neural augmenta-tion of KF-BB pairs trading. We present the proposed KBPT
+and its training 

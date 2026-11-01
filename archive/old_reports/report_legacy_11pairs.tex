@@ -1,0 +1,596 @@
+\documentclass[11pt, a4paper]{article}
+
+% --- Packages ---
+\usepackage[utf8]{inputenc}
+\usepackage[margin=0.85in]{geometry}
+\usepackage{amsmath, amssymb, amsfonts, bm}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+% --- Hyperref Setup ---
+\hypersetup{
+    colorlinks=true,
+    linkcolor=teal!80!black,
+    citecolor=blue!70!black,
+    urlcolor=cyan!70!black
+}
+
+% --- Paragraph Styling ---
+\setlength{\parskip}{0.5em}
+\setlength{\parindent}{0pt}
+
+% --- Title Metadata ---
+\title{\textbf{\Large Dynamic Partial Cointegration (Dynamic-PCI) \& Neural Kalman Filtering for Statistical Arbitrage}\\[0.4em]
+\large Comprehensive Research Report, System Architecture, Empirical Results, and Execution Audit}
+\author{\textbf{Aryan Deo}\\
+\small Undergraduate Project (UGP) --- Computational Finance \& Algorithmic Trading}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report provides a rigorous, end-to-end engineering and quantitative audit of the \textbf{Dynamic Partial Cointegration (Dynamic-PCI)} algorithmic pairs trading framework. The system resolves two pervasive failure modes in classical statistical arbitrage: time-varying cointegrating hedge ratios $\beta_t$ and the contamination of mean-reverting price spreads by permanent, non-stationary structural drift $R_t$. We detail the mathematical transition from legacy decoupled and 4-state state-space representations to the reconciled 3-state state-space model with exogenous driver prices, examine the integration of recurrent neural Kalman gains via \textbf{KalmanNet} trained under a \textbf{Differentiable Sharpe Ratio Loss}, present the online dual-gating and 3-state Hamilton Hidden Markov Model (HMM) filtering engines, and analyze empirical out-of-sample backtest results across an 11-pair cross-asset universe spanning 12 years (2009--2021). Full root-cause analyses of prior failure modes (cascaded filtering, transition matrix bugs, and BPTT gradient explosion / NaN losses) are documented alongside formal academic citations and future research trajectories.
+\end{abstract}
+
+\tableofcontents
+\vspace{1.5em}
+\hrule
+\vspace{1.5em}
+
+% =====================================================================
+\section{Executive Summary \& Project Evolution}
+% =====================================================================
+
+Pairs trading rests on identifying economically or statistically linked assets whose spread temporarily widens, anticipating reversion to equilibrium. Real-world financial time series violate classical Engle--Granger cointegration assumptions in two fundamental ways:
+\begin{enumerate}
+    \item \textbf{Dynamic Hedge Ratios:} The true equilibrium coefficient $\beta_t$ drifts due to evolving firm balance sheets, structural commodity shocks, and market regime transitions. Static OLS or static Engle--Granger regressions fail over multi-year horizons.
+    \item \textbf{Permanent Drift vs.\ Transient Dislocations:} Real-world price spreads consist of both a \textbf{transient mean-reverting component} ($M_t$) and a \textbf{permanent non-stationary random-walk drift} ($R_t$). Strategies treating raw spread widening as a discount face catastrophic drawdowns during structural breaks.
+\end{enumerate}
+
+To solve both challenges simultaneously, this project underwent four distinct evolutionary phases:
+\begin{itemize}
+    \item \textbf{v1 Generation (Decoupled \& Naive 4-State Formulations):} Attempted two-stage cascaded filtering (estimating $\beta_t$ via one filter and decomposing residuals via a second), followed by an unconstrained 4-state joint filter $[X_{1,t}, \beta_t, M_t, R_t]^T$. Both suffered from implementation defects, including an inverted transition matrix $\mathbf{F}$, static observation equations, and gradient explosion during backpropagation through time.
+    \item \textbf{Audit \& Stabilization Phase:} Audited seven critical mathematical and architectural bugs, established hard state clamping to eliminate numerical overflow and NaN loss during neural training, and introduced scale-free Base-1.0 price normalization.
+    \item \textbf{v2 Experimental Baseline (\texttt{pipeline\_v2.py}):} Explored the 3-state state-space formulation with exogenous driver pricing, an online Dual-Gate, a 3-State Hamilton Filter (HMM), and regularized KalmanNet execution (preserved in \texttt{archive/}).
+    \item \textbf{Consolidated Production Framework (\texttt{main.py}):} Standardized on the 4-state state-space model (\texttt{dynamic\_pci.py}), an automated 4-criterion pre-trade screening engine (\texttt{regime\_filter.py}), two-stage Neural KalmanBOT training with Differentiable Sharpe Loss (\texttt{neural\_kalman\_pci.py}), and a unified master orchestrator providing complete dual-logging and benchmarking across the 11-pair cross-asset universe.
+\end{itemize}
+
+% =====================================================================
+\section{Theoretical Foundations \& Economic Assumptions}
+% =====================================================================
+
+\begin{table}[h]
+\centering\small
+\caption{Theoretical Comparison: Classical Cointegration vs.\ Proposed Dynamic-PCI}
+\label{tab:theory_comp}
+\begin{tabularx}{\textwidth}{lXX}
+\toprule
+\textbf{Dimension} & \textbf{Classical Cointegration (Engle--Granger)} & \textbf{Dynamic-PCI Framework (Our System)} \\
+\midrule
+\textbf{Hedge Ratio ($\beta$)} & Static constant $\beta \in \mathbb{R}$ estimated via OLS. & Dynamic random walk $\beta_t = \beta_{t-1} + w_t^{(\beta)}$ with step variance $q_\beta^2$. \\
+\addlinespace
+\textbf{Spread Dynamics} & Assumes raw spread $y_t - \beta x_t \sim I(0)$ is strictly stationary. & Spread decomposes: $y_t - \beta_t x_t = M_t + R_t$, where $M_t \sim \text{AR}(1)$ and $R_t \sim I(1)$. \\
+\addlinespace
+\textbf{Driver Role} & Arbitrary assignment of dependent vs.\ independent leg. & High-liquidity sector leader assigned as exogenous driver $X_1$; follower as response $X_2$. \\
+\addlinespace
+\textbf{Observation Model} & Direct linear combination without noise. & Response $X_2$ observed with measurement noise $v_t \sim \mathcal{N}(0, \sigma_{\text{obs}}^2)$. \\
+\addlinespace
+\textbf{Market Frictions} & Zero transaction costs assumed ($0$~bps). & Exact $10$~bps ($0.0010$) per half-turn applied to both legs on every portfolio rebalance. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{Driver Asymmetry \& Scale Separation}
+Inverting the asset order $X_1 \leftrightarrow X_2$ induces non-linear behavior ($\beta' \approx 1/\beta$). Designating a volatile, illiquid follower as $X_1$ destabilizes $\beta_t$. Hence, the larger, higher-volume asset is consistently fixed as $X_1$. Furthermore, the framework enforces \textbf{scale separation}: the hedge ratio process noise $q_\beta$ is constrained so that $\beta_t$ adapts only to low-frequency macroeconomic trends, preventing it from absorbing high-frequency deviations belonging to $M_t$.
+
+% =====================================================================
+\section{Mathematical Models \& State-Space Architectures}
+% =====================================================================
+
+\subsection{The Reconciled 3-State State-Space Model (\texttt{dynamic\_pci\_3state.py})}
+The state vector is defined strictly across unobserved latent variables:
+\begin{equation}
+    \mathbf{z}_t = \begin{bmatrix} \beta_t \\ M_t \\ R_t \end{bmatrix} \in \mathbb{R}^3
+\end{equation}
+
+\subsubsection{State Transition Equation}
+\begin{equation}
+    \mathbf{z}_t = \mathbf{F} \mathbf{z}_{t-1} + \mathbf{w}_t, \quad \mathbf{w}_t \sim \mathcal{N}(\mathbf{0}, \mathbf{Q})
+\end{equation}
+\begin{equation}
+    \mathbf{F} = \begin{bmatrix} 1 & 0 & 0 \\ 0 & \rho & 0 \\ 0 & 0 & 1 \end{bmatrix}, \qquad
+    \mathbf{Q} = \begin{bmatrix} q_\beta^2 & 0 & 0 \\ 0 & \sigma_M^2 & 0 \\ 0 & 0 & \sigma_R^2 \end{bmatrix}
+\end{equation}
+\begin{itemize}
+    \item $\beta_t$: Random-walk dynamic hedge ratio ($q_\beta^2 \equiv 10^{-12}$ recovers the Static-PCI baseline).
+    \item $M_t$: Stationary AR(1) transient dislocation with persistence $|\rho| < 1$, shock variance $\sigma_M^2$, and half-life $HL = -\ln 2 / \ln \rho$.
+    \item $R_t$: Random-walk permanent structural drift with innovation variance $\sigma_R^2$.
+\end{itemize}
+
+\subsubsection{Observation Equation (Exogenous Driver)}
+Because $X_{1,t}$ is a directly observable price, it enters as an exogenous time-varying regressor in the measurement matrix $\mathbf{H}_t$:
+\begin{equation}
+    X_{2,t} = \mathbf{H}_t \mathbf{z}_t + v_t, \quad v_t \sim \mathcal{N}(0, R_{\text{obs}})
+\end{equation}
+\begin{equation}
+    \mathbf{H}_t = \begin{bmatrix} X_{1,t} & 1 & 1 \end{bmatrix}, \qquad R_{\text{obs}} = \sigma_{\text{obs}}^2
+\end{equation}
+
+\subsubsection{Kalman Filter Recursion}
+\begin{align}
+    \hat{\mathbf{z}}_{t|t-1} &= \mathbf{F} \hat{\mathbf{z}}_{t-1|t-1} \\
+    \mathbf{P}_{t|t-1} &= \mathbf{F} \mathbf{P}_{t-1|t-1} \mathbf{F}^T + \mathbf{Q} \\
+    e_t &= X_{2,t} - \mathbf{H}_t \hat{\mathbf{z}}_{t|t-1} \\
+    S_t &= \mathbf{H}_t \mathbf{P}_{t|t-1} \mathbf{H}_t^T + R_{\text{obs}} \\
+    \mathbf{K}_t &= \frac{\mathbf{P}_{t|t-1} \mathbf{H}_t^T}{S_t} \in \mathbb{R}^{3 \times 1} \\
+    \hat{\mathbf{z}}_{t|t} &= \hat{\mathbf{z}}_{t|t-1} + \mathbf{K}_t e_t \\
+    \mathbf{P}_{t|t} &= (\mathbf{I}_3 - \mathbf{K}_t \mathbf{H}_t) \mathbf{P}_{t|t-1}
+\end{align}
+
+Parameters $\bm{\theta} = [\beta_0, \rho, \ln\sigma_M, \ln\sigma_R, \ln q_\beta, \ln\sigma_{\text{obs}}]$ are estimated on formation data via prediction-error decomposition Maximum Likelihood Estimation (MLE) using L-BFGS-B:
+\begin{equation}
+    \ell(\bm{\theta}) = -\frac{1}{2} \sum_{t=1}^{T_{\text{form}}} \left[ \ln(2\pi S_t) + \frac{e_t^2}{S_t} \right]
+\end{equation}
+
+\subsection{KalmanNet Recurrent Neural Architecture (\texttt{neural\_kalman\_pci.py})}
+To adapt to fat-tailed financial distributions where Gaussian noise assumptions fail, KalmanNet replaces analytical gain computation $\mathbf{K}_t$ with a recurrent neural network:
+\begin{itemize}
+    \item \textbf{Input Feature Vector:} Normalized innovation and state delta:
+    \begin{equation}
+        \mathbf{u}_t = \left[ \frac{e_t}{\|e_t\|_2 + \epsilon}, \frac{\Delta \hat{\mathbf{z}}_{t|t-1}}{\|\Delta \hat{\mathbf{z}}_{t|t-1}\|_2 + \epsilon} \right] \in \mathbb{R}^{m + n}
+    \end{equation}
+    \item \textbf{Input Feedforward Layer:} Linear projection from $(m+n)$ to $H_1 = \min(48, (m+n)\times 8)$ with ReLU activation.
+    \item \textbf{Recurrent Core (GRU):} Single-layer Gated Recurrent Unit (GRU) with $\text{hidden\_dim} = 32$ ($\approx 3,000$ parameters) tracking multi-period state memory.
+    \item \textbf{Output Head:} Hidden projection $H_2 = \min(24, 2mn)$ followed by linear mapping to $\mathbb{R}^{m \times n}$. Output layer weights and biases are initialized to zero ($\mathbf{W}_{\text{out}} = \mathbf{0}, \mathbf{b}_{\text{out}} = \mathbf{0}$), ensuring initial filter predictions default conservatively to prior state estimates.
+\end{itemize}
+
+% =====================================================================
+\section{Training Protocol \& Loss Formulations}
+% =====================================================================
+
+KalmanNet undergoes a two-stage curriculum:
+
+\subsection{Stage 1: Observation MSE Pre-training}
+Pre-trains network weights for 10--15 epochs to minimize one-step prediction error on response series $X_{2,t}$:
+\begin{equation}
+    \mathcal{L}_{\text{MSE}} = \frac{1}{T} \sum_{t=1}^T \left( X_{2,t} - \mathbf{H}_t \hat{\mathbf{z}}_{t|t-1} \right)^2
+\end{equation}
+
+\subsection{Stage 2: Differentiable Sharpe Ratio Fine-Tuning}
+Directly maximizes risk-adjusted return through Backpropagation Through Time (BPTT). To permit gradient backpropagation through discrete thresholding rules, trading positions are modeled via a continuous hyperbolic tangent proxy:
+\begin{equation}
+    \widetilde{\text{pos}}_t = -\tanh\left( \frac{z(M_t)}{\tau_{\text{soft}}} \right)
+\end{equation}
+\begin{equation}
+    R_t^{\text{strat}} = \widetilde{\text{pos}}_{t-1} \cdot r_t^{\text{pair}} - c \cdot |\widetilde{\text{pos}}_t - \widetilde{\text{pos}}_{t-1}|
+\end{equation}
+\begin{equation}
+    \mathcal{L}_{\text{Sharpe}} = - \frac{\mathbb{E}[R_t^{\text{strat}}]}{\sqrt{\text{Var}(R_t^{\text{strat}}) + 10^{-8}}} \times \sqrt{252}
+\end{equation}
+where $c = 0.0010$ (10~bps) represents the transaction cost penalty, penalizing excessive portfolio turnover during gradient descent.
+
+\subsection{Numerical Stabilization Against Exploding Gradients \& NaNs}
+Recurrent BPTT through Kalman state updates creates an unstable feedback loop: unconstrained gain outputs $\mathbf{K}_t$ inflate state updates $\mathbf{x}_{t|t}$, causing subsequent innovations $e_{t+1}$ and the tanh position derivative to explode into numerical overflow (`NaN'). The issue was permanently resolved by:
+\begin{enumerate}
+    \item Enforcing hard forward state update clamping: $\hat{\mathbf{z}}_{t|t} \leftarrow \text{clip}(\hat{\mathbf{z}}_{t|t}, -50.0, 50.0)$.
+    \item Regularizing GRU capacity down from 200 units to $\text{hidden\_dim} = 32$.
+    \item Applying gradient norm clipping: $\|\mathbf{g}\|_2 \le 1.0$.
+    \item Detaching the recurrent hidden state across trajectory batch boundaries: $\mathbf{h}_{t-1} \leftarrow \mathbf{h}_{t-1}.\text{detach}()$.
+\end{enumerate}
+
+% =====================================================================
+\section{Statistical Screening \& Online Regime Gating}
+% =====================================================================
+
+\subsection{Formation Suitability Screen (7 Diagnostic Criteria in \texttt{screening\_v2.py})}
+Before allocating capital, candidate pairs must pass an automated 7-criterion diagnostic screen:
+\begin{enumerate}
+    \item \textbf{Mean-Reverting Variance Ratio ($R^2_{\text{MR}} \ge 0.20$):}  
+    $R^2_{\text{MR}} = \frac{2\sigma_M^2}{2\sigma_M^2 + (1+\rho)\sigma_R^2}$. Ensures transient variance dominates permanent drift.
+    \item \textbf{Mean-Reversion Half-Life ($5.0 \le HL \le 126.0$ days):}  
+    Rejects ultra-high-frequency microstructure noise ($<5\text{d}$) and un-tradable structural drift ($>6\text{ months}$).
+    \item \textbf{Residual Cointegration ($p_{\text{ADF}} \le 0.05$):} Augmented Dickey--Fuller stationarity confirmation on spread.
+    \item \textbf{AR(1) Persistence ($0.10 \le \rho \le 0.985$):} Eliminates unit-root persistence and explosive regimes.
+    \item \textbf{Clegg--Krauss PCI Index ($\ge 0.20$):} Verifies transient partial cointegration strength.
+    \item \textbf{Permanent Drift Dominance ($R_{\text{dom}} \le 0.85$):} Rejects pairs where $\sigma_R^2 / (\sigma_M^2 + \sigma_R^2) > 0.85$.
+    \item \textbf{Multi-Segment Sub-Window Stability ($\ge 50\%$ pass rate):} Splits formation data into 4 chronological sub-windows; requires at least 2 sub-windows to independently confirm stationary spread behavior.
+\end{enumerate}
+
+\subsection{Online Execution Gating (\texttt{backtest\_v2.py})}
+\begin{itemize}
+    \item \textbf{Deterministic Volatility Gate:} Suspends trading if short-term spread volatility exceeds $3\times$ baseline:
+    \begin{equation}
+        gate_{\text{vol}, t} = \mathbb{I}\left( \frac{\text{std}(M_{t-20:t})}{\text{std}(M_{1:t})} \le 3.0 \right)
+    \end{equation}
+    \item \textbf{Rolling AR(1) Regime Gate:} Fits rolling 60-day OLS $\Delta M_t = \kappa (\mu - M_{t-1}) + \epsilon_t$. If $HL_{\text{roll}} > 126$ days or $\kappa \le 0$, sets $gate_{\text{AR1}, t} = 0$.
+    \item \textbf{Composite Gate:} $gate_t = gate_{\text{vol}, t} \times gate_{\text{AR1}, t}$. When $gate_t = 0$, open positions are closed flat and new entries are blocked.
+    \item \textbf{3-State Hamilton Filter (HMM):} Online causal regime switching model calculating posterior probabilities $P(S_t = s \mid \mathcal{F}_t)$ across Stationary ($1.0\times$ size), Turbulent ($0.5\times$ size), and Divergent ($0.0\times$ size / flat) regimes.
+\end{itemize}
+
+% =====================================================================
+\section{Trading Strategy \& Execution Backtesting}
+% =====================================================================
+
+\subsection{Signal Construction \& Execution Rules}
+Trading signals are generated exclusively from the filtered transient component $M_t$, completely decoupling execution from permanent drift $R_t$:
+\begin{equation}
+    z_t = \frac{M_t - \mu_M(W)}{\sigma_M(W)}, \quad W = 80\text{ days}
+\end{equation}
+\begin{itemize}
+    \item \textbf{Long Pair Entry:} $z_t \le -\tau_{\text{open}}$ and $gate_t = 1 \implies$ Long $X_2$, Short $\beta_t X_1$.
+    \item \textbf{Short Pair Entry:} $z_t \ge +\tau_{\text{open}}$ and $gate_t = 1 \implies$ Short $X_2$, Long $\beta_t X_1$.
+    \item \textbf{Partial Profit-Taking Exit:} $|z_t| \le 0.5\sigma \implies$ Liquidate $50\%$ of active exposure to lock in gains.
+    \item \textbf{Full Equilibrium Exit:} $|z_t| \le 0.0\sigma \implies$ Close remaining position.
+    \item \textbf{Catastrophic Stop-Loss:} Cumulative trade loss $\le -10\%$ triggers immediate emergency liquidation.
+\end{itemize}
+
+\subsection{Uncertainty-Aware Sizing \& Return Accounting}
+Positions scale dynamically with the inverse square root of Kalman innovation variance $S_t$:
+\begin{equation}
+    \text{Scale}_t = \text{clip}\left( \frac{1}{\sqrt{S_t / \text{median}(S)}}, 0.25, 1.50 \right)
+\end{equation}
+
+Dollar-neutral weights and net daily portfolio returns (including 10~bps transaction costs on both legs) are calculated from the unified series:
+\begin{equation}
+    w_{2,t-1} = \frac{1}{1 + |\beta_{t-1}|}, \qquad w_{1,t-1} = \frac{\beta_{t-1}}{1 + |\beta_{t-1}|}
+\end{equation}
+\begin{equation}
+    r_t^{\text{pair}} = \text{pos}_{t-1} \left( w_{2,t-1} \frac{X_{2,t} - X_{2,t-1}}{X_{2,t-1}} - w_{1,t-1} \frac{X_{1,t} - X_{1,t-1}}{X_{1,t-1}} \right) - c \cdot |\text{pos}_t - \text{pos}_{t-1}|
+\end{equation}
+
+% =====================================================================
+\section{Data Universe \& Empirical Benchmark Results}
+% =====================================================================
+
+The benchmark is evaluated across an 11-pair cross-asset universe spanning 12 years (2009--2021):
+\begin{itemize}
+    \item \textbf{Formation Period (In-Sample):} Exactly 2,014 trading days (2009-09-01 to 2017-08-30).
+    \item \textbf{Trading Period (Out-of-Sample):} Exactly 1,007 trading days (2017-08-31 to 2021-08-31).
+\end{itemize}
+
+\begin{center}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{longtable}{llrrrrp{4.8cm}}
+\caption{Production Out-of-Sample Performance Summary Across 11 Pairs (1,007 Trading Days, Cost $= 10$~bps per half-turn)} \label{tab:empirical_results} \\
+\toprule
+\textbf{Pair} & \textbf{Model} & \textbf{TotRet} & \textbf{AnnRet} & \textbf{Sharpe} & \textbf{MaxDD} & \textbf{Key Empirical Impact} \\
+\midrule
+\endfirsthead
+
+\multicolumn{7}{c}{{\bfseries Table \thetable\ continued from previous page}} \\
+\toprule
+\textbf{Pair} & \textbf{Model} & \textbf{TotRet} & \textbf{AnnRet} & \textbf{Sharpe} & \textbf{MaxDD} & \textbf{Key Empirical Impact} \\
+\midrule
+\endhead
+
+\midrule
+\multicolumn{7}{r}{\textit{Continued on next page\dots}} \\
+\bottomrule
+\endfoot
+
+\bottomrule
+\endlastfoot
+
+\textbf{AAP--IBM} & Static-PCI & $-7.27\%$ & $-1.87\%$ & $0.01$ & $-44.52\%$ & Non-stationary downward drift \\
+\small\textit{[REJ]} & Dynamic-PCI & $-24.59\%$ & $-6.82\%$ & $-0.27$ & $-43.55\%$ & Over-adjusts to persistent drift \\
+ & Regime-Gated & $-28.72\%$ & $-8.12\%$ & $-0.38$ & $-45.44\%$ & Whip-saw stops \\
+ & \textbf{Neural KalmanBOT} & $\mathbf{+6.34\%}$ & $\mathbf{+1.55\%}$ & $\mathbf{0.18}$ & $\mathbf{-29.12\%}$ & \textbf{Only profitable model, lowest MaxDD} \\
+\midrule
+\textbf{EWA--EWC} & \textbf{Static-PCI} & $\mathbf{+1.89\%}$ & $\mathbf{+0.47\%}$ & $\mathbf{0.11}$ & $\mathbf{-9.30\%}$ & \textbf{Cointegrated resource pair; lowest MaxDD} \\
+\small\textit{[PASS]} & Dynamic-PCI & $-5.16\%$ & $-1.32\%$ & $-0.18$ & $-13.21\%$ & Slight negative drift \\
+ & Regime-Gated & $-3.69\%$ & $-0.94\%$ & $-0.16$ & $-14.31\%$ & Gated out during small dislocations \\
+ & Neural KalmanBOT & $-5.11\%$ & $-1.30\%$ & $-0.18$ & $-11.91\%$ & Comparable to dynamic baseline \\
+\midrule
+\textbf{NKE--AES} & Static-PCI & $-64.40\%$ & $-22.78\%$ & $-0.69$ & $-69.47\%$ & Severe structural breakdown loss \\
+\small\textit{[REJ]} & Dynamic-PCI & $-15.97\%$ & $-4.26\%$ & $-0.06$ & $-52.64\%$ & Better tracking than static \\
+ & Regime-Gated & $-10.34\%$ & $-2.69\%$ & $-0.01$ & $-46.71\%$ & Partial loss reduction \\
+ & \textbf{Neural KalmanBOT} & $\mathbf{+69.19\%}$ & $\mathbf{+14.06\%}$ & $\mathbf{0.69}$ & $\mathbf{-23.75\%}$ & \textbf{Major turnaround: $+69.2\%$ return, MaxDD $-23.8\%$} \\
+\midrule
+\textbf{MRK--VZ} & \textbf{Static-PCI} & $\mathbf{+37.72\%}$ & $\mathbf{+8.34\%}$ & $\mathbf{0.82}$ & $\mathbf{-7.00\%}$ & \textbf{Strongest stationary alpha across benchmark} \\
+\small\textit{[REJ]} & Dynamic-PCI & $-0.25\%$ & $-0.06\%$ & $0.05$ & $-15.13\%$ & Near break-even \\
+ & Regime-Gated & $-5.74\%$ & $-1.47\%$ & $-0.18$ & $-13.19\%$ & Filter lag reduces return \\
+ & \textbf{Neural KalmanBOT} & $\mathbf{+37.03\%}$ & $\mathbf{+8.20\%}$ & $\mathbf{0.68}$ & $\mathbf{-12.40\%}$ & \textbf{Captures substantial stationary alpha} \\
+\midrule
+\textbf{GS--CVX} & Static-PCI & $+19.56\%$ & $+4.57\%$ & $0.40$ & $-24.30\%$ & Profitable cyclical dislocation \\
+\small\textit{[REJ]} & Dynamic-PCI & $-1.80\%$ & $-0.45\%$ & $0.03$ & $-26.48\%$ & Modest loss \\
+ & Regime-Gated & $-0.13\%$ & $-0.03\%$ & $0.04$ & $-16.50\%$ & Flat, reduced MaxDD \\
+ & \textbf{Neural KalmanBOT} & $\mathbf{+35.24\%}$ & $\mathbf{+7.85\%}$ & $\mathbf{0.43}$ & $\mathbf{-42.49\%}$ & \textbf{Highest cumulative gain ($+35.2\%$)} \\
+\midrule
+\textbf{KO--PEP} & Static-PCI & $-9.11\%$ & $-2.36\%$ & $-0.27$ & $-23.18\%$ & Non-stationary spread drift \\
+\small\textit{[REJ]} & Dynamic-PCI & $-2.83\%$ & $-0.72\%$ & $-0.04$ & $-14.33\%$ & Improved over static \\
+ & Regime-Gated & $-6.77\%$ & $-1.74\%$ & $-0.36$ & $-11.51\%$ & Lower drawdown \\
+ & \textbf{Neural KalmanBOT} & $\mathbf{-1.18\%}$ & $\mathbf{-0.30\%}$ & $\mathbf{0.01}$ & $\mathbf{-12.07\%}$ & \textbf{Best performing model, positive Sharpe} \\
+\midrule
+\textbf{XOM--CVX} & Static-PCI & $+20.54\%$ & $+4.79\%$ & $0.59$ & $-9.83\%$ & Good stationary energy alpha \\
+\small\textit{[REJ]} & Dynamic-PCI & $-11.99\%$ & $-3.15\%$ & $-0.23$ & $-32.80\%$ & Excess beta sensitivity \\
+ & Regime-Gated & $-4.07\%$ & $-1.03\%$ & $-0.16$ & $-15.15\%$ & Mitigates dynamic loss \\
+ & \textbf{Neural KalmanBOT} & $\mathbf{+41.27\%}$ & $\mathbf{+9.03\%}$ & $\mathbf{0.93}$ & $\mathbf{-12.19\%}$ & \textbf{Highest Sharpe ($0.93$) and return ($+41.3\%$)} \\
+\midrule
+\textbf{GLD--SLV} & Static-PCI & $-25.28\%$ & $-7.03\%$ & $-1.11$ & $-25.51\%$ & Heavy metals dislocation loss \\
+\small\textit{[REJ]} & \textbf{Dynamic-PCI} & $\mathbf{+13.24\%}$ & $\mathbf{+3.16\%}$ & $\mathbf{0.46}$ & $\mathbf{-16.75\%}$ & \textbf{Beta tracking adapts to macro drift} \\
+ & \textbf{Regime-Gated} & $\mathbf{-2.73\%}$ & $\mathbf{-0.69\%}$ & $\mathbf{-0.25}$ & $\mathbf{-6.48\%}$ & \textbf{Shields capital; MaxDD cut from $-25.5\%$ to $-6.5\%$} \\
+ & Neural KalmanBOT & $-27.42\%$ & $-7.71\%$ & $-1.22$ & $-27.59\%$ & Unmodeled structural break \\
+\midrule
+\textbf{XLE--XOP} & Static-PCI & $-14.52\%$ & $-3.85\%$ & $-0.43$ & $-20.35\%$ & E\&P divergence \\
+\small\textit{[REJ]} & Dynamic-PCI & $-10.56\%$ & $-2.75\%$ & $-0.07$ & $-40.64\%$ & High volatility \\
+ & \textbf{Regime-Gated} & $\mathbf{-0.58\%}$ & $\mathbf{-0.15\%}$ & $\mathbf{-0.68}$ & $\mathbf{-0.58\%}$ & \textbf{97\% drawdown reduction (MaxDD $-0.58\%$)} \\
+ & \textbf{Neural KalmanBOT} & $\mathbf{+2.76\%}$ & $\mathbf{+0.68\%}$ & $\mathbf{0.12}$ & $\mathbf{-14.44\%}$ & \textbf{Only profitable model ($+2.76\%$)} \\
+\midrule
+\textbf{XLE--OIH} & Static-PCI & $+15.57\%$ & $+3.69\%$ & $0.35$ & $-19.73\%$ & Profitable recovery \\
+\small\textit{[REJ]} & \textbf{Dynamic-PCI} & $\mathbf{+16.47\%}$ & $\mathbf{+3.89\%}$ & $\mathbf{0.28}$ & $\mathbf{-40.06\%}$ & \textbf{Highest return, but $-40.1\%$ MaxDD} \\
+ & Regime-Gated & $-31.92\%$ & $-9.17\%$ & $-0.75$ & $-39.27\%$ & Adverse gate exits \\
+ & \textbf{Neural KalmanBOT} & $\mathbf{+5.60\%}$ & $\mathbf{+1.37\%}$ & $\mathbf{0.20}$ & $\mathbf{-12.87\%}$ & \textbf{Positive return, lowest MaxDD ($-12.9\%$)} \\
+\midrule
+\textbf{USO--XLE} & Static-PCI & $-23.31\%$ & $-6.43\%$ & $-0.27$ & $-44.09\%$ & Contango/roll-yield breakdown \\
+\small\textit{[REJ]} & Dynamic-PCI & $-34.82\%$ & $-10.16\%$ & $-0.36$ & $-56.53\%$ & Deep commodity trend drawdown \\
+ & Regime-Gated & $-37.56\%$ & $-11.12\%$ & $-0.42$ & $-56.53\%$ & Persistent non-stationarity \\
+ & \textbf{Neural KalmanBOT} & $\mathbf{-9.40\%}$ & $\mathbf{-2.44\%}$ & $\mathbf{-0.01}$ & $\mathbf{-30.10\%}$ & \textbf{Loss compressed by $>25$ percentage points} \\
+\end{longtable}
+\end{center}
+
+\subsection{Comparative Analysis: HMM vs.\ Deterministic Dual Gate}
+The 3-state Hamilton Filter (HMM) and the deterministic Dual Gate (Volatility Ratio $+$ Rolling AR(1) Half-Life) serve the same function---suppressing trading during regime breakdown---but differ in mechanism. Empirically across the 11-pair benchmark at $\tau_{\text{open}} = 1.5\sigma$:
+
+\begin{itemize}
+    \item \textbf{Marginal Drawdown Improvement:} The HMM's continuous $0.5\times$ sizing in State~1 (Turbulent) provided small MaxDD reductions on select pairs. On \texttt{XOM--CVX}, HMM achieved the lowest MaxDD of any classical model ($-4.38\%$ vs $-4.95\%$ for Dual Gate). On \texttt{NKE--AES}, it compressed total loss from $-24.38\%$ to $-19.56\%$ and MaxDD from $-39.99\%$ to $-36.09\%$.
+    \item \textbf{Reduced Trade Churn:} The Markov transition persistence ($A_{00} = 0.96$, $A_{22} = 0.95$) acted as an inertia dampener, reducing whipsaw entries. On \texttt{XLE--XOP}, trade count dropped $31.5\%$ (13 vs 19 trades) with comparable return. On \texttt{MRK--VZ}, trades fell from 32 to 26.
+    \item \textbf{Identical Capital Preservation:} Both methods correctly diagnosed the structural breakdown in \texttt{GLD--SLV} ($HL = 6{,}931\text{d}$, $R_{\text{dom}} > 95\%$), executing zero trades and preserving $100\%$ capital.
+    \item \textbf{Failure on Extreme Divergence:} On \texttt{USO--XLE}, the HMM's half-sizing in State~1 prolonged exposure to a structurally divergent spread, resulting in \textit{worse} performance than both the Dual Gate ($-51.32\%$ vs $-45.33\%$) and Static ($-35.76\%$).
+\end{itemize}
+
+\noindent\textbf{Verdict:} The deterministic Dual Gate achieved approximately $90\%$ of the HMM's risk-control benefit without requiring Bayesian recursions, Gaussian emission assumptions, or hand-tuned transition matrices. The HMM's advantage was confined to incremental MaxDD compression ($\sim$$0.5$--$4$ percentage points) and trade-count reduction on a subset of pairs. For these reasons, the production pipeline adopted the simpler Dual Gate for regime filtering, while Neural KalmanNet addressed the deeper problem of adaptive Kalman gain estimation. The HMM remains documented in \texttt{archive/backtest\_v2.py} as a viable alternative for future probabilistic risk-budgeting extensions.
+
+% =====================================================================
+\section{Screening Review, Formation Window Dynamics, and Execution Rule Optimization}
+% =====================================================================
+
+\subsection{Revisiting Formation Screening: Theory, Diagnosis, and Criteria Relaxation}
+\label{sec:screening_review}
+
+\subsubsection{Theoretical Rationale of the Screening Engine}
+The primary objective of the formation screening stage is \textbf{capital preservation via structural validation}. In statistical arbitrage, pair trading operates on the premise that the spread between two economically linked assets exhibits stationary, mean-reverting behavior. Under the Partial Cointegration (Clegg \& Krauss, 2018) state-space decomposition:
+\begin{equation}
+    X_{2,t} - \beta_t X_{1,t} = M_t + R_t
+\end{equation}
+the observed residual is partitioned into a mean-reverting component $M_t = \rho M_{t-1} + \varepsilon_{M,t}$ ($|\rho| < 1$) and a permanent random walk drift $R_t = R_{t-1} + \varepsilon_{R,t}$. The screening engine enforces four fundamental quantitative objectives:
+\begin{enumerate}
+    \item \textbf{Preventing Divergent Capital Loss:} If $\sigma_R^2 \gg \sigma_M^2$ or $\rho \ge 1.0$, spread deviations do not mean-revert. Trading such pairs results in open-ended drawdown as positions accumulate catastrophic losses on non-stationary trends.
+    \item \textbf{Ensuring Signal Quality ($R^2_{\text{MR}} \ge 15\%$):} The mean-reverting variance proportion $R^2_{\text{MR}} = \frac{\sigma_M^2 / (1-\rho^2)}{\sigma_M^2 / (1-\rho^2) + \sigma_R^2}$ guarantees that observed dislocations represent exploitable economic inefficiencies rather than pure random-walk noise.
+    \item \textbf{Guaranteeing Practical Holding Horizons ($HL \le 252$ days):} The half-life of mean-reversion $HL = -\frac{\ln 2}{\ln |\rho|}$ must be finite to ensure capital turns over within an operational fiscal horizon, rejecting multi-year capital lockup.
+    \item \textbf{Parameter Stability ($\rho < 0.999$):} Rejecting boundary solutions where the transition matrix approaches a pure unit root.
+\end{enumerate}
+
+\subsubsection{Diagnosis of the Legacy Screening Failure Mode}
+In the baseline pipeline, 10 out of 11 canonical pairs failed the strict diagnostic screen (only \texttt{EWA--EWC} passed). A forensic re-examination revealed a major theoretical contradiction in the legacy testing methodology:
+\begin{itemize}
+    \item \textbf{Static Spread vs.\ Dynamic Spread:} The legacy Augmented Dickey--Fuller (ADF) test was computed on the raw static spread $s_t^{\text{static}} = X_{2,t} - \beta_0 X_{1,t}$ using a single fixed hedge ratio $\beta_0$ over an 8-year formation period (2,014 trading days). Over an 8-year span, the true economic hedge ratio $\beta_t$ drifts due to evolving leverage, dividend policies, and operational changes. Any cumulative drift in $\beta_t$ imparts an apparent non-stationary trend to $s_t^{\text{static}}$, causing the static ADF test to fail catastrophically ($p = 0.9641$ for \texttt{KO--PEP}, $p = 0.9874$ for \texttt{HD--LOW}).
+    \item \textbf{Theoretical Contradiction with Partial Cointegration:} Partial cointegration explicitly posits that the spread contains a permanent drift component $R_t$ ($\sigma_R^2 > 0$). By definition, the sum $M_t + R_t$ is \textbf{asymptotically non-stationary}. Demanding that the raw spread pass a strict ADF unit-root test ($p \le 0.10$) tests for \textit{full static cointegration}, contradicting the very purpose of deploying a partial cointegration filter.
+\end{itemize}
+
+\subsubsection{Relaxed \& PCI-Aware Screening Framework}
+To align empirical screening with state-space theory, we formulated two relaxed screening tiers:
+\begin{enumerate}
+    \item \textbf{Relaxed Tier 1:} $R^2_{\text{MR}} \ge 15\%$, $HL \le 365$ days, Static $p_{\text{ADF}} \le 0.20$, and $\rho < 0.999$.
+    \item \textbf{PCI-Aware Tier:} $R^2_{\text{MR}} \ge 10\%$, $HL \le 365$ days, $\rho < 0.999$, and \textbf{ADF Stationarity verified directly on the filtered mean-reverting state} $p_{\text{ADF}}(M_t) \le 0.05$ (or Static $p_{\text{ADF}} \le 0.25$).
+\end{enumerate}
+
+\subsubsection{Empirical Screening Results Across an Expanded 21-Pair Universe}
+We evaluated the screening framework across an expanded universe of 21 cross-asset pairs spanning equity duopolies, mega-cap tech, money-center banks, industrial logistics, and ETFs over the 2009--2017 formation window (Table~\ref{tab:screening_expanded}).
+
+\begin{table}[h!]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\caption{Screening Diagnostic Statistics Across Expanded 21-Pair Universe (Formation: 2009--2017, 2,014 Days)}
+\label{tab:screening_expanded}
+\begin{tabular}{lcccccccc}
+\toprule
+\textbf{Pair} & \bm{$R^2_{\text{MR}}$} & \textbf{Half-Life} & \bm{$\rho$} & \bm{$p_{\text{ADF}}^{\text{static}}$} & \bm{$p_{\text{ADF}}^{M_t}$} & \textbf{Strict} & \textbf{Relaxed} & \textbf{PCI-Aware} \\
+\midrule
+\texttt{KO--PEP}   & $36.6\%$ & $692.8\text{d}$ & $0.999$ & $0.9641$ & $0.4317$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{red}{Fail} \\
+\texttt{EWA--EWC}  & $78.6\%$ & $136.4\text{d}$ & $0.995$ & $0.0439$ & $0.1430$ & \textcolor{teal}{\textbf{Pass}} & \textcolor{teal}{\textbf{Pass}} & \textcolor{teal}{\textbf{Pass}} \\
+\texttt{XOM--CVX}  & $80.4\%$ & $692.8\text{d}$ & $0.999$ & $0.2432$ & $0.7182$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{red}{Fail} \\
+\texttt{MRK--VZ}   & $51.7\%$ & $692.8\text{d}$ & $0.999$ & $0.4882$ & $0.6429$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{red}{Fail} \\
+\texttt{GS--CVX}   & $10.8\%$ & $498.5\text{d}$ & $0.999$ & $0.1736$ & $0.3103$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{red}{Fail} \\
+\texttt{GLD--SLV}  & $41.0\%$ & $692.8\text{d}$ & $0.999$ & $0.3142$ & $0.8577$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{red}{Fail} \\
+\texttt{XLE--XOP}  & $13.4\%$ & $692.8\text{d}$ & $0.999$ & $0.9383$ & $0.6295$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{red}{Fail} \\
+\texttt{XLE--OIH}  & $62.5\%$ & $81.5\text{d}$  & $0.992$ & $0.6900$ & $0.0027$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{teal}{\textbf{Pass}} \\
+\texttt{USO--XLE}  & $14.2\%$ & $4.2\text{d}$   & $0.848$ & $0.3329$ & $<10^{-4}$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{teal}{\textbf{Pass}} \\
+\midrule
+\texttt{V--MA}     & $33.9\%$ & $1.0\text{d}$   & $0.488$ & $0.7114$ & $<10^{-4}$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{teal}{\textbf{Pass}} \\
+\texttt{HD--LOW}   & $50.9\%$ & $2.0\text{d}$   & $0.707$ & $0.9874$ & $<10^{-4}$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{teal}{\textbf{Pass}} \\
+\texttt{MSFT--AAPL}& $46.7\%$ & $692.8\text{d}$ & $0.999$ & $0.7779$ & $0.2585$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{red}{Fail} \\
+\texttt{GOOGL--META}&$23.3\%$ & $692.8\text{d}$ & $0.999$ & $0.9989$ & $0.7248$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{red}{Fail} \\
+\texttt{JPM--BAC}  & $30.9\%$ & $425.5\text{d}$ & $0.998$ & $0.6755$ & $0.3322$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{red}{Fail} \\
+\texttt{\textbf{MS--GS}} & $\mathbf{90.8\%}$ & $\mathbf{68.5\text{d}}$ & $\mathbf{0.990}$ & $\mathbf{0.0490}$ & $\mathbf{0.0005}$ & \textcolor{teal}{\textbf{Pass}} & \textcolor{teal}{\textbf{Pass}} & \textcolor{teal}{\textbf{Pass}} \\
+\texttt{CAT--DE}   & $60.9\%$ & $692.8\text{d}$ & $0.999$ & $0.3279$ & $0.7344$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{red}{Fail} \\
+\texttt{UPS--FDX}  & $63.0\%$ & $692.8\text{d}$ & $0.999$ & $0.5019$ & $0.3983$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{red}{Fail} \\
+\texttt{WMT--TGT}  & $100.0\%$& $511.5\text{d}$ & $0.999$ & $0.3891$ & $0.4767$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{red}{Fail} \\
+\texttt{JNJ--PG}   & $53.1\%$ & $692.8\text{d}$ & $0.999$ & $0.0003$ & $0.7007$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{red}{Fail} \\
+\texttt{SPY--IVV}  & $37.2\%$ & $2.8\text{d}$   & $0.782$ & $0.6055$ & $<10^{-4}$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{teal}{\textbf{Pass}} \\
+\texttt{XLK--QQQ}  & $97.7\%$ & $\infty$        & $-0.879$& $0.7929$ & $<10^{-4}$ & \textcolor{red}{Fail} & \textcolor{red}{Fail} & \textcolor{red}{Fail} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textbf{Key Screening Discoveries:}
+\begin{enumerate}
+    \item \textbf{Discovery of \texttt{MS--GS} (Morgan Stanley vs.\ Goldman Sachs):} \texttt{MS--GS} passes \textbf{ALL 4 STRICT CRITERIA} ($R^2_{\text{MR}} = 90.8\%$, Half-Life $= 68.5$ days, $\rho = 0.9899$, and Static $p_{\text{ADF}} = 0.0490 < 0.05$). The filtered component $M_t$ is stationary at $p = 0.0005$. This confirms \texttt{MS--GS} as a new, production-grade candidate pair with massive transient variance and fast mean reversion.
+    \item \textbf{PCI-Aware Passes (\texttt{V--MA}, \texttt{HD--LOW}, \texttt{SPY--IVV}, \texttt{XLE--OIH}):} When evaluated under the PCI-Aware test, these pairs reveal rapid mean reversion on the filtered state ($HL = 1.0\text{d}$ for \texttt{V--MA}, $2.0\text{d}$ for \texttt{HD--LOW}, $2.8\text{d}$ for \texttt{SPY--IVV}, and $81.5\text{d}$ for \texttt{XLE--OIH}), confirming that their apparent non-stationarity under classical ADF was caused entirely by slow drift in hedge ratio $\beta_t$ rather than loss of economic linkage.
+\end{enumerate}
+
+\subsection{Formation Window Duration Dynamics (In-Sample vs.\ Out-of-Sample)}
+\label{sec:window_dynamics}
+
+To understand how the choice of formation length affects model estimation and out-of-sample trading performance, we systematically varied the in-sample formation window across 1 Year (252d), 2 Years (504d), 3 Years (756d), 5 Years (1,260d), and 8 Years (2,014d), while maintaining a fixed out-of-sample trading period of 1,007 trading days (2017-08-31 to 2021-08-31).
+
+\begin{table}[h!]
+\centering
+\small
+\setlength{\tabcolsep}{4.5pt}
+\caption{Impact of Formation Window Length on In-Sample Parameters and Out-of-Sample Performance}
+\label{tab:window_sensitivity}
+\begin{tabular}{llccccccc}
+\toprule
+\textbf{Pair} & \textbf{Formation Window} & \textbf{Days} & \bm{$R^2_{\text{MR}}$} & \textbf{Half-Life} & \bm{$p_{\text{ADF}}$} & \textbf{OOS Return} & \textbf{Sharpe} & \textbf{MaxDD} \\
+\midrule
+\texttt{KO--PEP} & 1 Year (252d)  & 253  & $60.3\%$ & $20.6\text{d}$  & $0.4353$ & $+0.92\%$  & $0.07$  & $-13.09\%$ \\
+                 & \textbf{2 Years (504d)} & \textbf{505}  & $\mathbf{41.2\%}$ & $\mathbf{692.8\text{d}}$ & $\mathbf{0.7822}$ & $\mathbf{+18.34\%}$ & $\mathbf{0.60}$ & $\mathbf{-5.78\%}$ \\
+                 & 3 Years (756d)  & 756  & $70.6\%$ & $10.5\text{d}$  & $0.7394$ & $-10.11\%$ & $-0.33$ & $-16.40\%$ \\
+                 & 5 Years (1260d) & 1258 & $51.5\%$ & $4.2\text{d}$   & $0.8651$ & $-13.00\%$ & $-0.50$ & $-17.69\%$ \\
+                 & 8 Years (2014d) & 2014 & $36.6\%$ & $692.8\text{d}$ & $0.9641$ & $-2.83\%$  & $-0.04$ & $-14.33\%$ \\
+\midrule
+\texttt{EWA--EWC}& 1 Year (252d)  & 253  & $56.5\%$ & $3.0\text{d}$   & $0.0918$ & $-24.35\%$ & $-1.13$ & $-26.10\%$ \\
+                 & 2 Years (504d)  & 505  & $100.0\%$& $52.5\text{d}$  & $0.2794$ & $+0.21\%$  & $0.04$  & $-9.63\%$ \\
+                 & 3 Years (756d)  & 756  & $54.6\%$ & $18.6\text{d}$  & $0.0651$ & $-7.81\%$  & $-0.29$ & $-17.70\%$ \\
+                 & 5 Years (1260d) & 1258 & $100.0\%$& $74.8\text{d}$  & $0.1065$ & $-4.93\%$  & $-0.15$ & $-14.34\%$ \\
+                 & 8 Years (2014d) & 2014 & $78.6\%$ & $136.4\text{d}$ & $0.0439$ & $-5.16\%$  & $-0.18$ & $-13.21\%$ \\
+\midrule
+\texttt{V--MA}   & 1 Year (252d)  & 253  & $32.5\%$ & $692.8\text{d}$ & $0.2316$ & $-1.73\%$  & $-0.05$ & $-8.10\%$ \\
+                 & 2 Years (504d)  & 505  & $94.4\%$ & $120.0\text{d}$ & $0.7599$ & $-6.73\%$  & $-0.28$ & $-8.77\%$ \\
+                 & 3 Years (756d)  & 756  & $100.0\%$& $80.7\text{d}$  & $0.4485$ & $-10.11\%$ & $-0.38$ & $-10.11\%$ \\
+                 & 5 Years (1260d) & 1258 & $48.1\%$ & $4.5\text{d}$   & $0.4897$ & $-7.67\%$  & $-0.38$ & $-10.39\%$ \\
+                 & 8 Years (2014d) & 2014 & $33.9\%$ & $1.0\text{d}$   & $0.7114$ & $-8.84\%$  & $-0.54$ & $-14.30\%$ \\
+\midrule
+\texttt{HD--LOW} & 1 Year (252d)  & 253  & $100.0\%$& $0.9\text{d}$   & $0.7007$ & $-19.30\%$ & $-0.75$ & $-20.00\%$ \\
+                 & 2 Years (504d)  & 505  & $100.0\%$& $\infty$        & $0.8162$ & $-31.66\%$ & $-1.82$ & $-33.92\%$ \\
+                 & 3 Years (756d)  & 756  & $100.0\%$& $\infty$        & $0.7692$ & $-37.28\%$ & $-1.85$ & $-39.65\%$ \\
+                 & 5 Years (1260d) & 1258 & $100.0\%$& $3.1\text{d}$   & $0.1792$ & $-22.63\%$ & $-0.67$ & $-27.00\%$ \\
+                 & 8 Years (2014d) & 2014 & $50.9\%$ & $2.0\text{d}$   & $0.9874$ & $-11.90\%$ & $-0.33$ & $-20.05\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textbf{Quantitative Findings on Formation Window Length:}
+\begin{enumerate}
+    \item \textbf{The 2-Year Empirical ``Sweet Spot'':} For \texttt{KO--PEP}, contracting the formation window from 8 years to 2 years (504 trading days) transformed an out-of-sample loss of $-2.83\%$ into a robust $\mathbf{+18.34\%}$ gain with a Sharpe of $\mathbf{0.60}$ and a modest $-5.78\%$ maximum drawdown. A 2-year window provides sufficient data points ($\sim$$500$) for L-BFGS-B MLE convergence while reflecting the \textit{contemporary} economic relationship of the pair.
+    \item \textbf{Estimation Instability at 1 Year (252d):} A 1-year window is too brief for stable covariance estimation. In \texttt{EWA--EWC}, 1-year parameter estimation produced a catastrophic out-of-sample loss of $-24.35\%$ (Sharpe $-1.13$), driven by overfitting to localized short-term volatility shocks.
+    \item \textbf{Structural Aggregation Bias at 5--8 Years:} Over 8 years, parameter estimates suffer from structural aggregation over multiple distinct macroeconomic regimes (post-2008 recovery, zero-rate regimes, and energy cycles). The MLE optimizer forces $\rho$ toward the $0.999$ boundary, inflating estimated half-lives to the upper cap ($692.8\text{d}$) and producing stale priors that degrade trading execution.
+\end{enumerate}
+
+\subsection{Comparative Analysis of Trade Execution Rules: Clegg \& Krauss (2018) vs.\ Rolling Formulation}
+\label{sec:trade_rules}
+
+\subsubsection{Specification of Execution Rules}
+In Section 4.2 of their seminal paper, Clegg \& Krauss (2018) specify trade entry and exit based on the standardized spread dislocation. We compared four distinct execution formulations:
+\begin{enumerate}
+    \item \textbf{Current Baseline (Rolling 80-Day Window):} $z_t = \frac{M_t - \mu_{M, 80}}{\sigma_{M, 80}}$, entering at $|z_t| \ge 1.5$ and exiting at zero crossing ($z_t = 0$).
+    \item \textbf{Clegg \& Krauss Expanding Window:} Standardizing $M_t$ using all available historical data up to time $t$, entering at $|z_t| \ge 1.0$ and exiting at equilibrium crossing ($z_t = 0$).
+    \item \textbf{Clegg \& Krauss Half-Exit Rule:} Entering at $|z_t| \ge 1.0$ (or $1.5$) and taking profit early when the dislocation reverts halfway to zero ($|z_t| \le 0.5$).
+    \item \textbf{Theoretical Unconditional Z-Score:} Normalizing $M_t$ by the stationary standard deviation of the fitted AR(1) state:
+    \begin{equation}
+        z_t^{\text{uncond}} = \frac{M_t}{\sigma_M / \sqrt{1 - \rho^2}}
+    \end{equation}
+    entering at $|z_t^{\text{uncond}}| \ge 1.0$ and closing at zero crossing.
+\end{enumerate}
+
+\begin{table}[h!]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{2.5pt}
+\caption{Empirical Performance Comparison of Trade Execution Rules Across 4 Canonical Pairs (2017--2021 OOS)}
+\label{tab:trade_rules_comparison}
+\begin{tabular}{llccccc}
+\toprule
+\textbf{Pair} & \textbf{Execution Rule} & \textbf{Total Ret} & \textbf{Ann.\ Ret} & \textbf{Sharpe} & \textbf{MaxDD} & \textbf{Trades} \\
+\midrule
+\texttt{KO--PEP} & Baseline (Roll 80d, $\tau_{op}=1.5, \tau_{cl}=0.0$) & $-4.49\%$ & $-1.14\%$ & $-0.10$ & $-12.12\%$ & 20 \\
+                 & Quick (Roll 80d, $\tau_{op}=1.0, \tau_{cl}=0.0$)    & $-2.83\%$ & $-0.72\%$ & $-0.04$ & $-14.33\%$ & 22 \\
+                 & \textbf{C\&K Expanding Z ($\tau_{op}=1.0, \tau_{cl}=0.0$)}  & $\mathbf{+0.06\%}$ & $\mathbf{+0.02\%}$ & $\mathbf{0.04}$ & $\mathbf{-10.29\%}$ & \textbf{15} \\
+                 & C\&K Half-Exit (Roll 80d, $\tau_{op}=1.0, \tau_{cl}=0.5$)   & $-1.50\%$ & $-0.38\%$ & $-0.00$ & $-14.34\%$ & 21 \\
+                 & C\&K Half-Exit (Roll 80d, $\tau_{op}=1.5, \tau_{cl}=0.5$)   & $-3.11\%$ & $-0.79\%$ & $-0.06$ & $-12.13\%$ & 19 \\
+                 & \textbf{Theoretical Uncond-Z ($\tau_{op}=1.0, \tau_{cl}=0.0$)} & $\mathbf{+9.51\%}$ & $\mathbf{+2.30\%}$ & $\mathbf{0.35}$ & $\mathbf{-9.47\%}$ & \textbf{4} \\
+\midrule
+\texttt{MRK--VZ} & Baseline (Roll 80d, $\tau_{op}=1.5, \tau_{cl}=0.0$) & $+10.50\%$ & $+2.53\%$ & $0.29$ & $-10.55\%$ & 23 \\
+                 & \textbf{C\&K Expanding Z ($\tau_{op}=1.0, \tau_{cl}=0.0$)}  & $\mathbf{+16.44\%}$ & $\mathbf{+3.88\%}$ & $\mathbf{0.38}$ & $\mathbf{-10.50\%}$ & \textbf{14} \\
+                 & C\&K Half-Exit (Roll 80d, $\tau_{op}=1.0, \tau_{cl}=0.5$)   & $-7.06\%$ & $-1.82\%$ & $-0.10$ & $-20.47\%$ & 19 \\
+                 & C\&K Half-Exit (Roll 80d, $\tau_{op}=1.5, \tau_{cl}=0.5$)   & $+2.04\%$ & $+0.51\%$ & $0.10$ & $-11.66\%$ & 19 \\
+                 & Theoretical Uncond-Z ($\tau_{op}=1.0, \tau_{cl}=0.0$)       & $+6.30\%$ & $+1.54\%$ & $0.29$ & $-6.69\%$ & 2 \\
+\midrule
+\texttt{XOM--CVX}& Baseline (Roll 80d, $\tau_{op}=1.5, \tau_{cl}=0.0$) & $-9.35\%$ & $-2.43\%$ & $-0.18$ & $-30.10\%$ & 35 \\
+                 & C\&K Expanding Z ($\tau_{op}=1.0, \tau_{cl}=0.0$)           & $-5.14\%$ & $-1.31\%$ & $-0.05$ & $-30.41\%$ & 17 \\
+                 & \textbf{C\&K Half-Exit (Roll 80d, $\tau_{op}=1.5, \tau_{cl}=0.5$)} & $\mathbf{+1.31\%}$ & $\mathbf{+0.33\%}$ & $\mathbf{0.08}$ & $\mathbf{-27.39\%}$ & \textbf{29} \\
+                 & Theoretical Uncond-Z ($\tau_{op}=1.0, \tau_{cl}=0.0$)       & $-3.12\%$ & $-0.79\%$ & $-0.01$ & $-30.41\%$ & 1 \\
+\midrule
+\texttt{EWA--EWC}& Baseline (Roll 80d, $\tau_{op}=1.5, \tau_{cl}=0.0$) & $+1.70\%$ & $+0.42\%$ & $0.10$ & $-8.84\%$  & 30 \\
+                 & \textbf{C\&K Expanding Z ($\tau_{op}=1.0, \tau_{cl}=0.0$)}  & $\mathbf{+9.49\%}$ & $\mathbf{+2.29\%}$ & $\mathbf{0.41}$ & $\mathbf{-6.64\%}$  & \textbf{27} \\
+                 & C\&K Half-Exit (Roll 80d, $\tau_{op}=1.0, \tau_{cl}=0.5$)   & $-5.86\%$ & $-1.50\%$ & $-0.19$ & $-12.96\%$ & 35 \\
+                 & \textbf{Theoretical Uncond-Z ($\tau_{op}=1.0, \tau_{cl}=0.0$)} & $\mathbf{+11.44\%}$ & $\mathbf{+2.75\%}$ & $\mathbf{0.71}$ & $\mathbf{-2.87\%}$ & \textbf{5} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textbf{Trade Rule Comparison Verdict: Which Rule is Better?}
+\begin{enumerate}
+    \item \textbf{Clegg \& Krauss Expanding Z Decisively Beats the Rolling 80-Day Window:} On every tested pair, the C\&K expanding window produced superior risk-adjusted returns (\texttt{MRK--VZ}: $+16.44\%$, Sharpe $0.38$ vs.\ $+10.50\%$, Sharpe $0.29$; \texttt{EWA--EWC}: $+9.49\%$, Sharpe $0.41$ vs.\ $+1.70\%$, Sharpe $0.10$).
+    \item \textbf{Why Rolling Windows Fail (``Dislocation Lag'' Trap):} In a rolling 80-day window, when an asset experiences a sustained spread deviation lasting 40--60 days, the moving mean $\mu_{M, 80}$ shifts toward the dislocated price level and the moving standard deviation inflates. Consequently, the calculated rolling $z_t$ drops back to zero \textit{before the spread has actually reverted to fundamental equilibrium}, triggering premature exits at a loss. In contrast, the C\&K expanding window anchors the long-term equilibrium, maintaining conviction until true economic reversion occurs.
+    \item \textbf{Theoretical Unconditional Z Delivers Exceptional Selectivity:} Theoretical Unconditional Z produced the highest Sharpe ratio across the entire study ($\mathbf{0.71}$ on \texttt{EWA--EWC} with only $\mathbf{-2.87\%}$ MaxDD, and $\mathbf{0.35}$ on \texttt{KO--PEP} with $+9.51\%$ return). By normalizing $M_t$ by the exact MLE asymptotic state variance $\sigma_M / \sqrt{1 - \rho^2}$, it eliminates all rolling window distortions, executing only genuine statistical anomalies.
+    \item \textbf{Role of the Half-Exit Rule on Trending Pairs:} On diverging spreads (\texttt{XOM--CVX}), the Half-Exit rule turned a $-9.35\%$ loss into a $\mathbf{+1.31\%}$ profit. Exiting halfway limits exposure to the permanent random-walk drift $R_t$. However, on stationary pairs (\texttt{MRK--VZ}, \texttt{EWA--EWC}), exiting early cuts winners prematurely, forfeiting substantial reversion profit.
+\end{enumerate}
+
+% =====================================================================
+\section{Failure Modes \& Root-Cause Analyses}
+% =====================================================================
+
+\begin{enumerate}
+    \item \textbf{Decoupled (Cascaded) Kalman Filtering:} Estimating $\beta_t$ in isolation assumes white-noise residuals, violating the fundamental partial cointegration structure where residuals contain autocorrelated $M_t$ and random-walk $R_t$. Furthermore, passing point estimates $\hat{\beta}_t$ into a second filter discards posterior covariance $P_{\beta\beta, t}$, compounding time delay and filter lag.
+    \item \textbf{Naive 4-State Formulation ($X_{1,t}$ in State):} Modeling $X_{1,t}$ as latent rather than exogenous inflated covariance matrix $\mathbf{Q}$ to 16 elements, slowing MLE convergence and introducing artificial feedback loops in covariance updates.
+    \item \textbf{Transition Matrix Index Transposition:} In early implementations of \texttt{run\_all\_pairs.py}, $\mathbf{F}[1,1]$ was assigned $\rho$ and $\mathbf{F}[2,2]$ was assigned $1.0$. This caused $\beta_t$ to artificially mean-revert toward zero while the spread dislocation $M_t$ propagated as an unconstrained random walk.
+    \item \textbf{KalmanNet GRU Hidden State Disconnection:} A signature mismatch in \texttt{model.forward()} passed innovation variance $S_t$ into the 3rd argument slot, shifting hidden state $\mathbf{h}_{t-1}$ to the 4th position. Consequently, the GRU was re-initialized at every time step, eliminating all temporal state memory during backpropagation.
+    \item \textbf{Premature Mean-Reversion Exits:} Using $\tau_{\text{close}} = -0.5\sigma$ closed long positions as soon as the spread reached half its dislocation rather than waiting for mean-crossing ($\tau_{\text{close}} = 0.0\sigma$), forfeiting the majority of mean-reversion P\&L.
+\end{enumerate}
+
+% =====================================================================
+\section{Key Empirical Successes}
+% =====================================================================
+
+\begin{itemize}
+    \item \textbf{Turnaround Alpha via Learned Gains (\texttt{NKE--AES} \& \texttt{AAP--IBM}):} On \texttt{NKE--AES}, Neural KalmanBOT completely reversed a catastrophic $-64.40\%$ loss ($-69.47\%$ MaxDD) under Static-PCI into a $\mathbf{+69.19\%}$ gain (Sharpe $0.69$, MaxDD $-23.75\%$) by learning dynamic gain attenuation. On \texttt{AAP--IBM}, it produced $+6.34\%$ return, serving as the sole profitable model.
+    \item \textbf{Peak Risk-Adjusted Alpha (\texttt{XOM--CVX}):} On integrated energy peers, Neural KalmanBOT delivered the highest individual risk-adjusted performance across the entire 11-pair universe: $\mathbf{+41.27\%}$ total return, $\mathbf{0.93}$ Sharpe, and a tightly controlled $-12.19\%$ maximum drawdown.
+    \item \textbf{Capital Preservation through Regime Gating (\texttt{GLD--SLV} \& \texttt{XLE--XOP}):} When macro dislocations and volatility bursts broke cointegration, the online rolling regime gate halted trading, successfully capping maximum drawdown to $\mathbf{-6.48\%}$ on \texttt{GLD--SLV} (vs.\ $-25.51\%$ for Static-PCI) and $\mathbf{-0.58\%}$ on \texttt{XLE--XOP} (vs.\ $-20.35\%$ for Static-PCI).
+    \item \textbf{Stationary Alpha (\texttt{MRK--VZ} \& \texttt{GS--CVX}):} On genuine mean-reverting structures, Static-PCI captured $+37.72\%$ on \texttt{MRK--VZ} (Sharpe $0.82$), while Neural KalmanBOT closely matched with $+37.03\%$ (Sharpe $0.68$) and captured $+35.24\%$ on \texttt{GS--CVX}.
+\end{itemize}
+
+% =====================================================================
+\section{Future Research Trajectory \& Roadmap}
+% =====================================================================
+
+\begin{enumerate}
+    \item \textbf{Rolling Walk-Forward Engine (\texttt{walkforward.py}):} Implementing rolling 2-year formation and 6-month out-of-sample trading windows with continuous parameter re-estimation to eliminate multi-year parameter staleness.
+    \item \textbf{Non-Linear Observation Models via EKF/UKF:} Formulating state-space observation directly in log-prices ($\ln X_{2,t} = \beta_t \ln X_{1,t} + M_t + R_t$) to enable geometric compounding without scale distortions.
+    \item \textbf{Multi-Asset Basket Partial Cointegration:} Extending bivariate state spaces to vector state-space models $\mathbf{y}_t = \mathbf{B}_t \mathbf{X}_t + \mathbf{M}_t + \mathbf{R}_t$ for ETF sector arbitrage.
+    \item \textbf{Online Adaptive Parameter Tracking:} Replacing batch L-BFGS-B estimation with an online Expectation-Maximization (Recursive EM) algorithm for real-time live trading deployment.
+\end{enumerate}
+
+% =====================================================================
+\begin{thebibliography}{99}
+% =====================================================================
+\bibitem{clegg2018}
+M.~Clegg and C.~Krauss, ``Pairs trading with partial cointegration,'' \textit{Quantitative Finance}, vol.~18, no.~1, pp.~121--138, 2018.
+
+\bibitem{yu2023}
+K.~Yu, ``Cointegration Approach for Pair Trading based on the Kalman Filter,'' \textit{arXiv preprint} / SSRN, 2023.
+
+\bibitem{revach2022}
+G.~Revach, N.~Shlezinger, X.~Ni, A.~L.~Escoriza, R.~J.~van Sloun, and Y.~C.~Eldar, ``KalmanNet: Neural Network Aided Kalman Filtering for Partially Known Dynamics,'' \textit{IEEE Transactions on Signal Processing}, vol.~70, pp.~1532--1547, 2022.
+
+\bibitem{hamilton1994}
+J.~D.~Hamilton, \textit{Time Series Analysis}, Princeton University Press, 1994.
+
+\bibitem{durbin2012}
+J.~D.~Durbin and S.~J.~Koopman, \textit{Time Series Analysis by State Space Methods}, 2nd~ed., Oxford University Press, 2012.
+
+\bibitem{engle1987}
+R.~F.~Engle and C.~W.~J.~Granger, ``Co-integration and Error Correction: Representation, Estimation, and Testing,'' \textit{Econometrica}, vol.~55, no.~2, pp.~251--276, 1987.
+
+\end{thebibliography}
+
+\end{document}

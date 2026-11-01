@@ -1,0 +1,555 @@
+=== PAGE 5 ===
+1978 IEEE TRANSACTIONS ON SIGNAL PROCESSING, VOL. 72, 2024
+smaller magnitude impact the market much less. Therefore, we
+operate under the assumption that the act of buying or selling
+assets by the trader does not exert any discernible impact onthe intrinsic pricing dynamics of the assets involved, i.e., the
+magnitude of trades is not large enough to impact the market.
+This is a common assumption that is taken in many pair tradingschemes [4],[17],[54]. From a signal processing perspective,
+impacting the market turns the framework from a ‘tracking’
+model to a ‘control’ model. Our focus is on trades that are notof such magnitude.
+To describe this model, we ﬁrst review the notion of CI and
+how it gives rise to a SS model for pairs trading in Section III-A .
+Then, in Section III-B , we review the extended PCI model and
+present our SS representation for pairs trading that follows from
+the PCI model. The proposed extended SS model is used to
+derive KBPT in Section IV.
+A. Co-Integration in Pairs Trading
+We next review the notion of CI and how it is specialized for
+pairs trading.
+1) Co-Integration: To deﬁne CI, we ﬁrst recall the deﬁnition
+of integration order (see, e.g., [ 14, Ch. 2.6]):
+Deﬁnition 1 (Integration Order): A time series is called
+integrated of order p, denoted as I(p), if the time series obtained
+by taking the difference of the time series ptimes is weakly
+stationary while taking the difference of the time series p−1
+times yields a series that is not weakly stationary.
+Deﬁnition 1refers to the basic statement of integration or-
+der. A more general deﬁnition consi ders weighted differences,
+stated as follows:
+Deﬁnition 2 (Weighted Integration Order): A time series x
+t
+is said to be weight integrated with order p, and written as
+xt∼WI(p), if there exists a (p+1)×1vectorwsuch that
+wTxtis a stationary time series, with xt/defines[xt,xt−1,...,xt−p].
+Deﬁnition 2is clearly a generalization of Deﬁnition 1. Spe-
+ciﬁcally, if we set was a vector of (p+1) ones. then Deﬁni-
+tion 1is obtained. For brevity, in the remainder of the paper,
+when we say that a series is integrated , we refer to the general
+case of Deﬁnition 2.
+The deﬁnition of CI generalizes Deﬁnition 2by considering
+multivariate time sequences as follows:
+Deﬁnition 3 (Co-Integration): A(p+1)×1multivariate
+time sequence ¯xt=[x(1)
+t,x(2)
+t,...,x(p+1)
+t]is said to obey a
+CI model of order p, denoted ¯xt∼CI(p), if there exists a
+(p+1)×1vectorwsuch that wTxtis stationary.
+Deﬁnition 3clearly specializes Deﬁnition 2, as for a time
+seriesxtwith integration order p, one can equivalently deﬁne
+the co-integrated multivariate time sequence ¯xtby having its
+τth entry, denoted x(τ)
+t,s e tt ox(τ)
+t=xt−τ+1for every τ∈
+{1,...,p+1}.
+2) Co-Integration in Pairs Trading: CI is often used to
+model pairs trading. In this framework, the two assets αtandβt
+are assumed to obey a CI(1) model (see Def. 3). In particular,
+we deﬁne the spread time sequence stvia
+st=βt−h·αt−μ, (13)and look for handμsuch that stis a zero-mean stationary time
+series. We refer to has the hedge ratio andμas the equilibrium
+value . These parameters are typically estimated by rewriting
+(13)a s
+βt=st+h·αt+μ, (14)
+from which handμcan be recovered from a set of pairs as in
+(12) via, e.g., least-squares [57]. Oncehandμare estimated,
+one can apply statistical tests to check for stationarity, e.g.,
+Dicky-Fuller test [58] or Johansen test [59].
+3) Co-Integration SS Model: An inherent limitation with the
+above form of CI modeling of pairs trading follows from the fact
+thathandμare assumed to be static. In practice, they might
+drift, and the resulting model may not be reliable enough to
+serve as a basis for designing trading policies. However, the CIframework in ( 14) can be used to form a SS model that supports
+tracking of the hedge ratio and equilib rium values us ing, e.g.,
+the KF.
+The SS model for pairs trading with the CI framework as-
+sumes that handμare ﬁrst-order Markov processes
+h
+t=ht−1+/epsilon1h
+t, (15a)
+μt=μt−1+/epsilon1μ
+t, (15b)
+where/epsilon1h
+tand/epsilon1μ
+tfollow an i.i.d. Gaussian distribution. Ac-
+cordingly, the relationship between the assets pairs in ( 14)i s
+replaced with
+βt=st+ht·αt+μt. (15c)
+The representation in ( 15) gives rise to a SS model as follows.
+The latent state vector is xt=[ht,μt]T, the observation is set
+to beyt=βt, and the underlying dynamics of the SS model are
+xt=Ft·xt−1+et=/bracketleftbigg
+10
+01/bracketrightbigg
+xt−1+et, (16a)
+yt=gT
+t·xt+vt=/bracketleftbig
+αt1/bracketrightbig
+xt+vt. (16b)
+In (16b),vtis modeled as white Gaussian observation noise,
+and the measurement noise is given by et/defines[/epsilon1h
+t,/epsilon1μ
+t]T.D e -
+signing trading policies based on ( 16) requires estimating the
+parameters as a form of system identiﬁcation, e.g., the second-order moments of the noise signals v
+tandet, which can be
+done via maximum likelihood-based estimation [17], expecta-
+tion maximization [60], autocovariance least-squares [61],o r
+the ﬂexible least squares method [62].
+Formulating the evolution of the hedge ratio and equilibrium
+value as a linear Gaussian SS via ( 16) allows the tracking
+of these parameters using the KF. The KF is comprised of
+prediction and update stages, respectively, given as
+ˆxt|t−1=Ft·ˆxt−1,ˆyt|t−1=gT
+t·ˆxt|t−1, (17a)
+ˆxt=Kt·Δyt+ˆxt|t−1,Δyt=yt−ˆyt|t−1. (17b)
+In (17b),Ktis the KG computed from the second-order mo-
+ments, and Δytis the innovation term.
+By (15c),Δytcan be written as
+Δyt=yt−ˆht|t−1αt−ˆμt|t−1, (18)
+Authorized licensed use limited to: INDIAN INSTITUTE OF TECHNOLOGY KANPUR. Downloaded on August 12,2026 at 06:42:54 UTC from IEEE Xplore.  Restrictions apply. 
+=== PAGE 6 ===
+MILSTEIN et al.: NEURAL AUGMENTED KALMAN FILTERING WITH BOLLINGER BANDS FOR PAIRS TRADING 1979
+and thus, it describes the difference between the posterior
+and the prior. Using the fact that yt=βtand substituting the
+time-varying relationship between αtandβtfrom ( 18), we
+obtain that
+Δyt=st+/parenleftBig
+(ht−ˆht|t−1)+(μt−ˆμt|t−1)/parenrightBig
+. (19)
+From ( 19), it follows that Δytis an estimate of the value
+of the spread corrupted by an additive term that representsthe estimation error at time t. Thus,Δy
+tcan be used as an
+equivalent pairwise asset, from which one can extract a valuable
+indicator for BB as in ( 4), i.e.,
+zt=Δyt
+σy
+t. (20)
+Here,σy
+tis the STD of Δyt(which is also tracked by the KF
+for computing the KG).
+B. Partial Co-Integration in Pairs Trading
+While the CI model for pairs trading gives rise to a simple
+KF-aided trading policy, it is limited in the sense that it does not
+incorporate any temporal statistical model on the spread timesequence, which is at the core of the ﬁnancial indicator. Such
+a temporal statistical model is incorporated by extending the
+n o t i o no fC Ii n t oP C I [17]. In the following, we ﬁrst recall the
+PCI deﬁnition, after which we re view its associated SS model
+proposed in [17], and then further extend it to propose the SS
+model for pairs trading used in our derivation in Section IV.
+1) Partial Co-Integration: An extended deﬁnition of CI is
+that of PCI [17]:
+Deﬁnition 4 (Partial Co-Integration): A multivariate time
+sequence ¯x
+tis said to obey a PCI model of order p,q, denoted
+¯xt∼PCI(p,q), if there exists a vector wsuch that the time
+serieswTxtis a combination of scalar time sequences that
+are integrated in time with orders qandp−q. Namely, it can
+be decomposed into wTxt=μt+stwhereμt∼WI(q)and
+st∼WI(p−q).
+Note that any CI multiva riate time s equence (Deﬁnition 3)
+is also PCI and is obtained when q=p=0, which results in
+wTxtbeing a stationary time series.
+2) Partial Co-Integration in Pairs Trading: As suggested
+in[17], the PCI model can be used to generalize the CI
+model for pairs trading. In this case, it is assumed that
+[βt,αt]∼PCI(1,1), i.e.,
+βt=st+h·αt+μt, (21a)
+where
+st=ρst−1+/epsilon1s
+t, (21b)
+μt=μt−1+/epsilon1μ
+t. (21c)
+The PCI model for pairs trading preserves the notions of spread
+(st) and hedge ratio ( h) - where in this model, the hedge
+ratio is constant unlike in the CI model which it was mod-
+eled as time-varying. It introduces the parameter ρ∈(−1,1)
+as an autoregression coefﬁcient, while /epsilon1μ
+t,/epsilon1s
+tare stationary
+signals, often modeled as mutually independent Gaussian white
+noises [17].The PCI framework in ( 21) introduces two main degrees of
+freedom compared with the CI model in ( 14):(i)First, the CI
+model does not explicitly capture the temporal correlation in thespread time sequence s
+t, where the PCI model incorporates such
+correlation via its autoregressive modeling and the parameter er
+ρ;(ii)PCI captures temporal varia tions in the equilibrium value
+μt, by modeling it as a random walk.
+3) Partial Co-Integration SS Model: The SS model pro-
+posed in [17]for using the PCI representation in ( 21) for trading
+policies sets the latent state vector to be xt=[αt,st,μt]T,t h e
+observation to be yt=[βt,αt]T, and the underlying dynamics
+of the SS model are
+yt=Htxt=/bracketleftbiggh11
+100/bracketrightbigg
+xt, (22a)
+xt=Ftxt−1+qt
+=⎡
+⎣100
+0ρ0
+001⎤
+⎦xt−1+⎡
+⎣/epsilon1β
+t
+/epsilon1s
+t
+/epsilon1μ
+t⎤
+⎦. (22b)
+In (22),qtis a multivariate white Gaussian noise.
+Note that the SS model in ( 22), which is the one suggested
+in[17], differs from the CI -based SS model of ( 16) not only in
+its usage of the PCI model but also in the fact that the spread is
+considered in the state vector, while the hedge ratio is assumed
+to be static. Accordingly, one can track the state using the KF(given in ( 17a)-(17b)) respectively, and use the tracked spread
+to form the indicator used for BB trading as
+z
+t=ˆst
+σs
+t(23)
+whereσs
+tis the STD of the spread.
+4) Proposed Partial Co-Integrated SS Model: While the
+PCI model in ( 22) offers additional degrees of freedom in cap-
+turing temporal dependencies in the spread, it is associated with
+two main drawbacks: (i)the hedge ratio is modeled as being
+static, which, as stated before, might not always be the case;
+and(ii)the model assumes that all the noises are Gaussian,
+i.i.d. and mutually independent. In ﬁnancial data, this is rarely
+the case [ 14, Ch. 3]. Accordingly, we propose an alternative SS
+model for pairs trading, which shares the improved temporaldegrees of freedom of the PCI model while accounting for the
+dynamic nature of the hedge ratio without imposing a speciﬁc
+distribution on the stochasticity.
+Our proposed SS Model is similar to the CI SS model in
+(16). At the same time, we also add the assumed autoregressive
+behavior of the spread in ( 21b). Speciﬁcally, our latent space
+vector isx
+t=[ ht,μt,st]T, the observation is yt=βt, and the
+dynamics of the systems are modeled as
+xt=Ftxt−1+et=⎡
+⎣100
+010
+00ρ⎤
+⎦xt−1+et, (24a)
+yt=gT
+txt+vt=/bracketleftbig
+αt11/bracketrightbig
+xt+vt. (24b)
+It is emphasized that we do not impose a speciﬁc distribution
+on the noise vectors etandvt, unlike in ( 16) and ( 22), where
+Gaussian noise are assumed.
+Authorized licensed use limited to: INDIAN INSTITUTE OF TECHNOLOGY KANPUR. Downloaded on August 12,2026 at 06:42:54 UTC from IEEE Xplore.  Restrictions apply. 
+=== PAGE 7 ===
+1980 IEEE TRANSACTIONS ON SIGNAL PROCESSING, VOL. 72, 2024
+IV . N EURAL AUGMENTED TRADING POLICY
+We are interested in exploitin g the SS model representation
+in (24) for formulating a trading policy following established
+approaches combining KF and BB policies, e.g., [17]. However,
+the application of such methodologies gives rise to the follow-ing challenges:
+C1modeling Stochasticity: KF inherently assumes Gaussian
+noise. This is unlikely to hold in ﬁnancial data, and thenoise tends to follow a heavy-tailed distribution [63].
+C2modeling Mismatches: the models for F
+tandgtin (24),
+which follow from the PCI, are an approximation of thecomplex real-world dynamics governing pairs trading.
+Therefore, a model mismatch is inevitable.
+C3State Tracking: Tracking based on KF is inherently de-
+signed to provide an accurate estimate of its state vector
+x
+t. Here,xtis comprised of model parameters that do not
+necessarily represent a physi cal quantity but are rather in-
+termediate variables used for trading policy. One is really
+interested in obtaining a representation that is most useful
+for pairs trading in the PNL sense. However, the conven-tional KF is tailorly designed to optimize tracking the
+state, which is here assumed model parameters, though
+this might be sub-optimal for maximizing the PNL.
+To enable pairs trading under C1–C3, we propose a hybrid
+model-based/data-driven algorithm based on neural augmenta-tion of KF-BB pairs trading. We present the proposed KBPT
+and its training procedure in Sections IV-A -IV-B , respectively,
+and a discussion is provided in Section IV-C .
+A. KalmanNet-Aided Bollinger Bands Pairs Trading
+1) High Level Design: We design our pairs trading scheme
+to preserve the interpretable and reliable operation of the com-
+bination of KF with BB trading under our proposed SS model in(24). To cope with challenges C1-C2, we augment the operation
+of the KF, and speciﬁcally its computation of the KG, with a
+dedicated RNN, following the KalmanNet algorithm proposedin[36]. KalmanNet systematically uses the available model
+parameters F
+tandgtwhile using an RNN to bypass the need
+to track the statistical moments of the dynamics, allowing itto overcome C1-C2. To cope with C3, we leverage the train-
+ability of KalmanNet to adapt the overall policy based on the
+PNL objective, i.e., to provide a ﬁnancial indicator that is mostuseful for trading, rather than arising from the most accurate
+description of the state. This is not always possible with fully
+model-based methods, which inherently separate tracking frompolicy-making, and thus the tracking method is invariant to the
+main objective, i.e., maximizing the PNL.
+2) PCI SS Tracking With KalmanNet: Our pairs trading
+scheme thus consists of three components, depicted in Fig. 3.
+The ﬁrst component is KalmanNet, which takes as input the twoassets used for pairs trading, tracks the state vector under the
+SS model of ( 24), and outputs the innovation Δy
+t.
+KalmanNet augments the model-based KF with an RNN
+to cope with model mismatch and non-linearities. The RNN,
+whose trainable parameters are denoted by θis used to output
+the KG, denoted here Kt(θ). Since the computation of the KG
+Fig. 3. KBPT pipeline.
+in the KF encapsulates the dependency on the distribution of the
+noise signals, replacing it with a trainable architecture bypassesthe need to impose such a model and enables us to model com-
+plex, non-linear noises due to the underlying architecture of the
+RNN, while preserving the operation of the KF. Accordingly,the prediction and update stages of KalmanNet are given by
+ˆx
+t|t−1=Ft·ˆxt−1,ˆyt|t−1=gT
+t·ˆxt|t−1, (25a)
+ˆxt=Kt(θ)·Δyt+ˆxt|t−1,Δyt=yt−ˆyt|t−1.(25b)
+The sole difference between ( 25) and ( 17) is that here in the
+update stage in ( 25b) utilizes the KG computed by the RNN,
+instead of computing it from knowledge of the underlying
+statistics. KalmanNet leverages the SS representation of pairs
+trading and maintains the low latency and complexity of KF-
+aided tracking while coping with its inevitable mismatches andapproximation errors. The detailed architecture of the RNN is
+given in [36].
+3) BB-Based Trading: The innovation produced by Kalman-
+Net is passed to the indicator extractor which outputs its Z-
+score, denoted z
+t,v i a
+zt=Δyt
+ˆσt. (26)
+In (26),ˆσtis the empirical STD of the innovation process
+calculated using a rolling wi ndow. In our experimental study
+reported in Section V,w eu s e daw i n d o ws i z eo f 80samples
+based on empirical trials. The architecture of KalmanNet with
+the indicator extractor is depicted in Fig. 4.
+The indicator in ( 26) is selected for its ability to facili-
+tate stable learning of the overall trading policy based on the
+PNL objective. In BB-based pairs trading policies, the indica-tor is often chosen to correspond to the spread. For instance,
+in the trading policy based on the CI model, described in
+Section III-A3 , the indicator was chosen to be Δy
+t, as it encap-
+sulates the spread, as can be seen by the derivation in ( 19). Also,
+in the trading policy based on the PCI model of [17], described
+in Section III-B3 , the spread is explicitly tracked as st, and this
+feature is therefore is used as the indicator. Our formulation
+in (26) combines these approaches. Even though our proposed
+method is inﬂuenced by the PCI model, we use the Z-score of
+Δytas the indicator. This is because, upon further numerical
+evaluations on different pairs, we consistently observed thatusingΔy
+tas the indicator allows achieving better and more
+stable learning. Speciﬁcally, the usage of this indicator was
+shown to facilitate training KalmanNet to maximize the overall
+Authorized licensed use limited to: INDIAN INSTITUTE OF TECHNOLOGY KANPUR. Downloaded on August 12,2026 at 06:42:54 UTC from IEEE Xplore.  Restrictions apply. 
+=== PAGE 8 ===
+MILSTEIN et al.: NEURAL AUGMENTED KALMAN FILTERING WITH BOLLINGER BANDS FOR PAIRS TRADING 1981
+Fig. 4. KalmanNet with indicator extraction for the BB trade policy.
+Algorithm 1: Neural Augmented (KBPT) at Time t
+Init: RNN parameters θ
+Input: Previous estimate ˆxt−1=[ˆht−1,ˆμt−1,ˆst−1]/latticetop;
+Assetsβt,αt.
+KalmanNet:
+1Predictˆyt|t−1via (25a);
+2Update estimate and compute Δytvia (25b);
+Indicator Extraction:
+3Calculate feature ztvia (26);
+Bollinger Bands:
+4Compute ptvia (7) and ( 9) withztas argument;
+PNL, yielding learned features that most suit the subsequent
+BB-based policy.
+The ﬁnal component of our trading policy executes the BB
+trade policy on zt. Its output is the position to take at time t
+denoted as ptbased on ( 7) for opening and ( 9) for closing. The
+resulting overall trading policy is summarized as Algorithm 1.
+4) Reward: The BB policy is stated in Section II-B for a
+single asset. Here, since we consider pairs trading, an open
+position for the ith transaction at time to
+iimplies open positions
+onα,β in the sum of 1$. Its division between the assets is
+based on the current hedge ratio, i.e., ˆhto
+i. Similarly, when the
+position is closed at time tc
+i, we close the open positions on α,β
+according to the hedge ˆhtc
+i. Accordingly, the reward of each
+asset in such a transaction is the sum of the rewards in αand
+inβ, i.e.,
+rϕ,π
+i=rϕ,π,β
+i+rϕ,π,α
+i. (27)
+To formulate the individual reward terms in ( 27), recall that opto
+iis the position taken on the spread . Consequently, to set the
+position taken with respect to βandαindividually it should be
+multiplied by ζto
+i/definessign(βto
+i−ˆhto
+iαtoi)and−ζto
+i, respectively,
+to determine what position is taken on each individual assetgiven a position on the spread. The resulting reward terms
+are thus
+rϕ,π,β
+i=/parenleftBigg
+βtc
+i
+1+|ˆhtc
+i|−βto
+i
+1+|ˆhto
+i|/parenrightBigg
+·optc
+i·ζto
+i, (28a)
+rϕ,π,α
+i=/parenleftBigg
+|ˆhto
+i|αto
+i
+1+|ˆhto
+i|−|ˆhtc
+i|αtc
+i
+1+|ˆhtc
+i|/parenrightBigg
+·opto
+i·ζto
+i. (28b)
+As in [4],[64], we consider pairs trading in which the hedge
+ratiohis allowed to change over time. Accordingly, one is likely
+to have that ˆhto
+i/negationslash=ˆhtc
+i, implying that the trader may open and
+close with different quantities of each of the assets. In Sec-tionIV-C , we further discuss this property.
+B. Training Procedure
+The trading policy is stated in Algorithm 1for a given pa-
+rameterization θ. The tuning of these parameters is carried out
+based on a data set comprised of a sequence of measured asset
+pairsDgiven in ( 12). To train θ, we use a two-step training
+procedure, which ﬁrst trains KalmanNet separately from the
+trading task for stability and then adapts the overall architecture
+based on the PNL, thus tackling C3. These two steps are detailed
+next.
+1) Task-Ignorant Training: This ﬁrst step acts as a warm
+start. It tunes θto be good initial values fo r training the overall
+policy to maximize the PNL in Step 2. To that aim, we train
+only KalmanNet with the objective of optimizing the tracking
+of the state vector x
+twith stochastic gradient descent.
+In its original formulation in [36], KalmanNet is trained in a
+supervised manner, i.e., using mu ltiple trajectories of observa-
+tions and their corresponding gt states. Such a scheme cannot be
+applied here as the state xtcomprises modeling parameters for
+which one cannot provide gt. To overcome this challenge, wefollow the unsupervised learning procedure proposed in [45],
+where the training loss is computed based on the predicted
+measurements and not on the estimated state. The data set
+Authorized licensed use limited to: INDIAN INSTITUTE OF TECHNOLOGY KANPUR. Downloaded on August 12,2026 at 06:42:54 UTC from IEEE Xplore.  Restrictions apply. 
+=== PAGE 9 ===
+1982 IEEE TRANSACTIONS ON SIGNAL PROCESSING, VOL. 72, 2024
+Algorithm 2: Training Step 1
+Init: Randomly initialize θ, step size η1>0
+Input: Initial estimate ˆx0=[ˆh0,ˆμ0,ˆs0]T;
+Data setD.
+1foreach training epoch do
+2 DivideDintoQbatches{Dq}Q
+q=1;
+3 foreachqdo
+4 foreachtdo
+5 Predictˆyt|t−1via (25a);
+6 Update estimate via ( 25b);
+7 Compute LDq,1(θ)via (29);
+8 Updateθ←θ−η1∇LDq,1(θ);
+Dis used to construct the sequence {Ft,gt,yt}, where the
+prediction ˆyt|t−1is computed using ( 17a). The resulting loss
+used for training θis given by
+LD,1(θ)=1
+|D|/summationdisplay
+(αt,βt)∈D/bardblyt−ˆyt|t−1/bardbl2. (29)
+The training (step 1) procedure is summarized as Algorithm 2.
+2) Training End-to-End: In this second and last step, we
+train KalmanNet in an end-to-end manner based on the overall
+system task of pairs trading with full gradient descent. We adapt
+θto maximize the PNL, namely, our loss function is
+L2(θ)=−N/summationdisplay
+i=0rϕ,π
+i. (30)
+In (30),rϕ,π
+iis theith reward given in ( 27) andNis the number
+of active position taken.
+A core challenge to optimize the trainable parameters with
+respect to ( 30) stems from the non-differentiable nature of the
+policy in ( 7) and ( 9). This prevents conventional deep learn-
+ing optimizers based on gradient-descent, from being used.
+We overcome this challenge by approximating ( 7) and ( 9)
+with a differentiable mapping during training . Accordingly,
+we replace the unit step function with a parametric surrogate
+[65],ˆUρ(·), i.e., we compute the positions using ( 7) and ( 9),
+while taking the gradient of ( 30) assuming their surrogate
+approximations
+opt=/parenleftBig
+ˆUρ(−1−zt)−ˆUρ(zt−1)/parenrightBig
+·ˆUρ(τcp,t−τop,t),(31)
+and
+cpt=ˆUρ(−zt−1·zt)·(1−ˆUρ(τcp,t−τop,t)), (32)
+respectively. Following [65], we set the surrogate approxima-
+tionˆUρ(·)to be the cumulative distribution function of a zero-
+mean Gaussian random variable with variance γ2, i.e.,
+ˆUρ(x)=/integraldisplayx
+τ=−∞1/radicalbig
+2πγ2exp/braceleftbigg
+−τ2
+2γ2/bracerightbigg
+dτ. (33)
+The differentiable nature and the simple derivative of the Gaus-
+sian function in ( 33) enables computing the gradients of ( 30)
+using backpropagation, converting Algorithm 1into a discrim-
+inative trainable model [46]. The second training step is sum-
+marized as Algorithm 3.Algorithm 3: Training Step 2
+Init: Step size η2>0
+Input: Initial estimate ˆx0=[ˆh0,ˆμ0,ˆs0]T;
+Data setD;
+Pre-trained parameters θfrom Step 1.
+1foreach training Epoch do
+2 foreachtdo
+3 Compute ptvia Algorithm 1withθ;
+4 Compute L2(θ)via (30);
+5 Compute ∇L2(θ)with ( 7) and ( 9) approximated as
+(31) and ( 32), respectively;
+6 Updateθ←θ−η2∇L2(θ);
+C. Discussion
+KBPT jointly exploits both the approximated SS model rep-
+resentation in ( 24) along with a principled augmentation of
+deep learning techniques. This hybrid model-based/data-driven
+framework utilizes the str ength of each one the approaches –
+both classical techniques based on SS models as well as data-driven deep learning tools. On one hand, we have partial domain
+knowledge, which we approximate using the PCI model of the
+system dynamics. This lets us ma intain the interpretability and
+transparency of the algorithm, which is crucial, especially when
+one wants to invest based on such an algorithm. On the other
+hand, we use data and deep lear ning capabilitie s to overcome
+challenges elegantly C1–C3.
+As empirically shown in Section V, our hybrid policy allows
+us to surpass the performance of other fully model-based or
+fully data-driven frameworks. The fact that KBPT exploits the
+trainability of KalmanNet and l earns its tracking mapping from
+data based on the PNL yields a tracking rule that does not
+necessarily give the most accurate tracking but is useful for
+trading, which is our primary objective. This gain of KBPTfollows from its ability to learn to overcome the inherent mis-
+matches of describing pairs trading as a SS model, as well as
+the need to estimate the model parameters. We achieve thisby utilizing the fact that KalmanNet does not need to esti-
+mate the SS model parameters exp licitly but instead learns to
+compute the KG such that the PNL is maximized, which isthe primary goal. In addition, due to the interpretability of the
+framework, at each point in time, one can monitor the tracked
+latent state vector of the policy and understand why each actionwas taken.
+Integrating model-based deep learning techniques with ﬁnan-
+cial decision-making paves the way for many avenues for future
+exploration. Our derivation of Algorithm 1does not account
+for the transaction cost of each buy/sell action. As this is oftena signiﬁcant factor in deciding if to perform such an action,
+one can potentially add a penalty term for each transaction
+made to the PNL function. In that way, the second step of thetraining (Algorithm 3) will optimize with regard to the transac-
+tion costs. Nonetheless, it is empirically shown in Section V
+that even without explicitly accounting for transaction cost,
+KBPT still typically achieves its improved PNL with fewer
+Authorized licensed use limited to: INDIAN INSTITUTE OF TECHNOLOGY KANPUR. Downloaded on August 12,2026 at 06:42:54 UTC from IEEE Xplore.  Restrictions apply. 
